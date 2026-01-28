@@ -28,6 +28,12 @@ app_name: str = ""
 company_name: str = ""
 email: str = ""
 
+# 用于 finally 安全退出
+driver = None
+
+# 生成并发布静态页需要的输出文件
+PRIVACY_TEXT_OUT = Path(__file__).resolve().parent / "privacy_text.txt"
+
 
 def html_to_formatted_text(html_fragment: str) -> str:
     """将 privacy_simple_content 的 innerHTML 转成较好粘贴的纯文本，保留段落、列表和链接结构。"""
@@ -385,6 +391,13 @@ def extract_and_show_privacy_text(driver, wait_seconds=12):
     # 尝试复制到系统剪贴板
     copy_to_clipboard_macos(text)
 
+    # 同时写出到文件，方便后续 GitHub Pages 发布
+    try:
+        PRIVACY_TEXT_OUT.write_text(text, encoding="utf-8")
+        print(f"📝 已写入隐私文本到文件: {PRIVACY_TEXT_OUT}")
+    except Exception as e:
+        print(f"⚠️ 写入隐私文本文件失败: {e}")
+
     driver.execute_script(
         """
         (function(value){
@@ -433,6 +446,32 @@ def extract_and_show_privacy_text(driver, wait_seconds=12):
     print(text)
     print("------ Privacy Policy 文本结束 ------")
     print("------ 已复制到系统剪贴板 (pbcopy) ------")
+
+    # 可选：自动发布到 GitHub Pages（依赖 googleSites.py + git push SSH）
+    try:
+        # googleSites.py 页面的 H1/<title> 已固定为 Privacy Policy，这里的 title 仅用于生成 slug 后半部分
+        app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
+
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "googleSites.py"),
+                # title 用 app_name（用于 slug 后缀），页面展示标题固定，不会显示这个
+                "--title",
+                app_title,
+                # id 用用户输入编号（用于 slug 前缀 base64）
+                "--id",
+                str(args.id),
+                "--content-file",
+                str(PRIVACY_TEXT_OUT),
+                "--commit-message",
+                f"Publish privacy page: {app_title}",
+            ],
+            check=False,
+        )
+    except Exception as e:
+        print(f"⚠️ 自动发布到 GitHub Pages 失败（不影响后续流程）: {e}")
+
     return text
 
 
@@ -795,14 +834,14 @@ if __name__ == "__main__":
             print("❌ 未能获取 records，脚本退出")
             sys.exit(1)
 
-        # save_to_json(records, "records_complete.json")
         available_records = find_and_collect_by_target_value(records, target_value=args.id)
-        # save_to_json(available_records, "state_filtered.json")
-
         vps_result = extract_vps_array_from_doc22(available_records, cookies_str)
-        # save_to_json(vps_result, "vps_result.json")
+
         driver = create_driver()
         run_privacy_flow(driver=driver, target_os="Android")
     finally:
-        if driver:
-           driver.quit()
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
