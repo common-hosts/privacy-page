@@ -78,8 +78,12 @@ def _resolve_pages_ssh_key() -> Optional[Path]:
 def _ensure_ssh_agent_has_key() -> None:
     """Ensure ssh-agent is running and has the pages SSH key loaded.
 
-    If the key has a passphrase, the first run may prompt in terminal.
-    This prevents non-interactive git subprocess from hanging at "Enter passphrase".
+    Best practice on macOS: use Keychain so you never re-enter the passphrase.
+
+    One-time setup (manual):
+      ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts
+
+    After that, future runs can use the key non-interactively.
     """
     key_path = _resolve_pages_ssh_key()
     if not key_path:
@@ -96,13 +100,23 @@ def _ensure_ssh_agent_has_key() -> None:
         if m_pid:
             os.environ["SSH_AGENT_PID"] = m_pid.group(1)
 
-    # Check if key already added
+    # Already loaded?
     p = subprocess.run(["ssh-add", "-l"], text=True, capture_output=True)
     if p.returncode == 0 and (key_path.name in (p.stdout or "")):
         return
 
-    # Add key (may prompt for passphrase)
-    subprocess.run(["ssh-add", str(key_path)], check=True)
+    # Try to load without prompting (batch mode). If fail, print actionable hint.
+    p = subprocess.run(["ssh-add", "-q", str(key_path)], text=True, capture_output=True)
+    if p.returncode == 0:
+        return
+
+    hint = (
+        "\n⚠️ 无法无交互加载 SSH key（通常是 key 有 passphrase 且未存进 Keychain）。\n"
+        "请在终端手动执行一次：\n"
+        "  ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts\n"
+        "输入一次口令后，以后就不会再提示了。\n"
+    )
+    print(hint)
 
 
 def _git_env_for_pages_push() -> dict[str, str]:
