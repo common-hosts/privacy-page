@@ -360,6 +360,52 @@ def click_next_footer(driver, timeout=5):
     return False
 
 
+def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file: Path) -> str:
+    """调用 googleSites.py，把本地生成的 pages/<slug>/index.html 推送到远端并等待可访问。
+
+    返回：发布后的 page_url（尽最大努力从输出中提取）。
+    """
+    env = os.environ.copy()
+    env.setdefault("PRIVACY_PAGES_SSH_HOST", "github-common-hosts")
+    env.setdefault("PRIVACY_PAGES_SSH_KEY", str(Path("~/.ssh/id_ed25519_common_hosts").expanduser()))
+
+    safe_title = (app_title or "privacy-policy").strip() or "privacy-policy"
+    safe_id = (publish_id or "").strip()
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve().parent / "googleSites.py"),
+        "--title",
+        safe_title,
+        "--id",
+        safe_id,
+        "--content-file",
+        str(content_file),
+        "--commit-message",
+        f"Publish privacy page: {safe_title}",
+    ]
+
+    p = subprocess.run(cmd, env=env, text=True, capture_output=True)
+    combined = (p.stdout or "") + ("\n" + (p.stderr or "") if p.stderr else "")
+
+    # 从输出里提取 URL（googleSites.py 会打印 🌐 Page URL: ...）
+    m = re.search(r"(https?://[^\s]+/pages/[^\s]+/)", combined)
+    page_url = m.group(1) if m else ""
+
+    if p.returncode != 0:
+        print("❌ 自动发布到 GitHub Pages 失败（googleSites.py 返回非 0）。")
+        if combined.strip():
+            print(combined.strip())
+        # fallback：至少把本地提交推到远端，避免用户误以为已发布
+        print("🔁 fallback：尝试执行一次 `git push origin main`...")
+        try:
+            subprocess.run(["git", "push", "origin", "main"], cwd=str(Path(__file__).resolve().parent), check=False)
+        except Exception:
+            pass
+
+    return page_url
+
+
 # python
 def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = ""):
     driver.switch_to.default_content()
@@ -451,30 +497,9 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
     # 可选：自动发布到 GitHub Pages（依赖 googleSites.py + git push SSH）
     try:
         app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
-
-        env = os.environ.copy()
-        # 强制 googleSites.py 走 common-hosts 的 ssh key（避免选错 key 导致 publickey 失败）
-        env.setdefault("PRIVACY_PAGES_SSH_HOST", "github-common-hosts")
-        env.setdefault("PRIVACY_PAGES_SSH_KEY", str(Path("~/.ssh/id_ed25519_common_hosts").expanduser()))
-
-        publish_id = (publish_id or "").strip()
-
-        subprocess.run(
-            [
-                sys.executable,
-                str(Path(__file__).resolve().parent / "googleSites.py"),
-                "--title",
-                app_title,
-                "--id",
-                publish_id,
-                "--content-file",
-                str(PRIVACY_TEXT_OUT),
-                "--commit-message",
-                f"Publish privacy page: {app_title}",
-            ],
-            env=env,
-            check=False,
-        )
+        publish_url = publish_privacy_page_to_github(app_title, publish_id, PRIVACY_TEXT_OUT)
+        if publish_url:
+            print(f"🌐 已发布网页地址: {publish_url}")
     except Exception as e:
         print(f"⚠️ 自动发布到 GitHub Pages 失败（不影响后续流程）: {e}")
 
