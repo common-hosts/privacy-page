@@ -2,6 +2,7 @@ import html
 import sys
 import urllib
 import subprocess
+import os
 
 import requests
 from selenium import webdriver
@@ -360,7 +361,7 @@ def click_next_footer(driver, timeout=5):
 
 
 # python
-def extract_and_show_privacy_text(driver, wait_seconds=12):
+def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = ""):
     driver.switch_to.default_content()
     try:
         WebDriverWait(driver, wait_seconds).until(
@@ -449,24 +450,29 @@ def extract_and_show_privacy_text(driver, wait_seconds=12):
 
     # 可选：自动发布到 GitHub Pages（依赖 googleSites.py + git push SSH）
     try:
-        # googleSites.py 页面的 H1/<title> 已固定为 Privacy Policy，这里的 title 仅用于生成 slug 后半部分
         app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
+
+        env = os.environ.copy()
+        # 强制 googleSites.py 走 common-hosts 的 ssh key（避免选错 key 导致 publickey 失败）
+        env.setdefault("PRIVACY_PAGES_SSH_HOST", "github-common-hosts")
+        env.setdefault("PRIVACY_PAGES_SSH_KEY", str(Path("~/.ssh/id_ed25519_common_hosts").expanduser()))
+
+        publish_id = (publish_id or "").strip()
 
         subprocess.run(
             [
                 sys.executable,
                 str(Path(__file__).resolve().parent / "googleSites.py"),
-                # title 用 app_name（用于 slug 后缀），页面展示标题固定，不会显示这个
                 "--title",
                 app_title,
-                # id 用用户输入编号（用于 slug 前缀 base64）
                 "--id",
-                str(args.id),
+                publish_id,
                 "--content-file",
                 str(PRIVACY_TEXT_OUT),
                 "--commit-message",
                 f"Publish privacy page: {app_title}",
             ],
+            env=env,
             check=False,
         )
     except Exception as e:
@@ -475,7 +481,7 @@ def extract_and_show_privacy_text(driver, wait_seconds=12):
     return text
 
 
-def run_privacy_flow(driver, target_os="Android"):
+def run_privacy_flow(driver, target_os="Android", publish_id: str = ""):
     """
     执行隐私生成流程（基于 app-privacy-policy-generator）。
 
@@ -594,7 +600,7 @@ def run_privacy_flow(driver, target_os="Android"):
             continue
     if not clicked_priv:
         print("❌ 没有找到 Privacy Policy 按钮")
-    extract_and_show_privacy_text(driver)
+    extract_and_show_privacy_text(driver, publish_id=publish_id)
     # return True
 
 
@@ -838,7 +844,7 @@ if __name__ == "__main__":
         vps_result = extract_vps_array_from_doc22(available_records, cookies_str)
 
         driver = create_driver()
-        run_privacy_flow(driver=driver, target_os="Android")
+        run_privacy_flow(driver=driver, target_os="Android", publish_id=args.id)
     finally:
         if driver is not None:
             try:
