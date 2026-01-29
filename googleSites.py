@@ -75,21 +75,43 @@ def _resolve_pages_ssh_key() -> Optional[Path]:
     return DEFAULT_PAGES_SSH_KEY if DEFAULT_PAGES_SSH_KEY.exists() else None
 
 
-def _git_env_for_pages_push() -> dict[str, str]:
-    """Force git to use the intended SSH identity.
+def _ensure_ssh_agent_has_key() -> None:
+    """Ensure ssh-agent is running and has the pages SSH key loaded.
 
-    This prevents `git push` from accidentally selecting another key (multi-account 常见坑)。
+    If the key has a passphrase, the first run may prompt in terminal.
+    This prevents non-interactive git subprocess from hanging at "Enter passphrase".
     """
     key_path = _resolve_pages_ssh_key()
     if not key_path:
-        return {}
+        return
 
+    # Start agent if needed
+    if not os.environ.get("SSH_AUTH_SOCK"):
+        p = subprocess.run(["ssh-agent", "-s"], text=True, capture_output=True)
+        out = p.stdout or ""
+        m_sock = re.search(r"SSH_AUTH_SOCK=([^;]+);", out)
+        m_pid = re.search(r"SSH_AGENT_PID=(\d+);", out)
+        if m_sock:
+            os.environ["SSH_AUTH_SOCK"] = m_sock.group(1)
+        if m_pid:
+            os.environ["SSH_AGENT_PID"] = m_pid.group(1)
+
+    # Check if key already added
+    p = subprocess.run(["ssh-add", "-l"], text=True, capture_output=True)
+    if p.returncode == 0 and (key_path.name in (p.stdout or "")):
+        return
+
+    # Add key (may prompt for passphrase)
+    subprocess.run(["ssh-add", str(key_path)], check=True)
+
+
+def _git_env_for_pages_push() -> dict[str, str]:
+    """Force git to use ssh-agent and prevent key selection issues."""
+    _ensure_ssh_agent_has_key()
+
+    # Use ssh-agent (do NOT use -i here; -i can cause passphrase prompt issues in subprocess)
     return {
-        "GIT_SSH_COMMAND": (
-            f"ssh -i {str(key_path)} "
-            f"-o IdentitiesOnly=yes "
-            f"-o StrictHostKeyChecking=accept-new"
-        )
+        "GIT_SSH_COMMAND": "ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
     }
 
 
@@ -264,19 +286,28 @@ def git_commit_push(commit_message: str) -> None:
 
     run(["git", "add", "-A"], cwd=REPO_ROOT)
 
-    # 如果没有变更，commit 会 exit 1；这里先检测一下
     st = run(["git", "status", "--porcelain"], cwd=REPO_ROOT, check=False)
     if not (st.stdout or "").strip():
         print("ℹ️ 没有文件变更，跳过 commit。")
     else:
         run(["git", "commit", "-m", commit_message], cwd=REPO_ROOT)
 
-    # push 必须带 env，强制使用对应 key
     env = _git_env_for_pages_push()
-    # 获取当前分支名
     b = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT)
     branch = (b.stdout or "main").strip() or "main"
-    run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
+
+    try:
+        run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
+    except subprocess.CalledProcessError as e:
+        # Print extra debug about remote + ssh config
+        try:
+            print("--- git remote -v ---")
+            rp = subprocess.run(["git", "remote", "-v"], cwd=str(REPO_ROOT), text=True, capture_output=True)
+            print((rp.stdout or "").strip())
+        except Exception:
+            pass
+        print(f"--- GIT_SSH_COMMAND ---\n{env.get('GIT_SSH_COMMAND','')}\n---------------------")
+        raise
 
 
 def main():
