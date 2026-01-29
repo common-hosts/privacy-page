@@ -80,12 +80,11 @@ def _resolve_pages_ssh_key() -> Optional[Path]:
 def _ensure_ssh_agent_has_key() -> None:
     """Ensure ssh-agent is running and has the pages SSH key loaded.
 
-    Best practice on macOS: use Keychain so you never re-enter the passphrase.
+    On macOS, the best practice is to store the passphrase in Keychain once,
+    then use ssh-agent non-interactively forever.
 
     One-time setup (manual):
       ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts
-
-    After that, future runs can use the key non-interactively.
     """
     key_path = _resolve_pages_ssh_key()
     if not key_path:
@@ -107,16 +106,13 @@ def _ensure_ssh_agent_has_key() -> None:
     if p.returncode == 0 and (key_path.name in (p.stdout or "")):
         return
 
-    # Try to load without prompting (batch mode). If fail, print actionable hint.
-    p = subprocess.run(["ssh-add", "-q", str(key_path)], text=True, capture_output=True)
-    if p.returncode == 0:
-        return
-
+    # IMPORTANT: do not trigger an interactive passphrase prompt from a subprocess.
+    # If key isn't available yet, print a clear one-time setup instruction.
     hint = (
-        "\n⚠️ 无法无交互加载 SSH key（通常是 key 有 passphrase 且未存进 Keychain）。\n"
-        "请在终端手动执行一次：\n"
+        "\n⚠️ SSH key 未在 ssh-agent 中加载，且脚本不会在后台弹出口令输入。\n"
+        "请在终端手动执行一次（只需一次）：\n"
         "  ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts\n"
-        "输入一次口令后，以后就不会再提示了。\n"
+        "之后再运行脚本即可做到全自动 push。\n"
     )
     print(hint)
 
