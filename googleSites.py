@@ -77,6 +77,22 @@ def _resolve_pages_ssh_key() -> Optional[Path]:
     return DEFAULT_PAGES_SSH_KEY if DEFAULT_PAGES_SSH_KEY.exists() else None
 
 
+def _key_loaded_in_agent(key_path: Path) -> bool:
+    try:
+        pub_path = Path(str(key_path) + ".pub")
+        if not pub_path.exists():
+            return False
+        pub = pub_path.read_text(encoding="utf-8").strip()
+        if not pub:
+            return False
+        p = subprocess.run(["ssh-add", "-L"], text=True, capture_output=True)
+        if p.returncode != 0:
+            return False
+        return pub.split()[1] in (p.stdout or "")
+    except Exception:
+        return False
+
+
 def _ensure_ssh_agent_has_key() -> None:
     """Ensure ssh-agent is running and has the pages SSH key loaded.
 
@@ -102,8 +118,7 @@ def _ensure_ssh_agent_has_key() -> None:
             os.environ["SSH_AGENT_PID"] = m_pid.group(1)
 
     # Already loaded?
-    p = subprocess.run(["ssh-add", "-l"], text=True, capture_output=True)
-    if p.returncode == 0 and (key_path.name in (p.stdout or "")):
+    if _key_loaded_in_agent(key_path):
         return
 
     # IMPORTANT: do not trigger an interactive passphrase prompt from a subprocess.
