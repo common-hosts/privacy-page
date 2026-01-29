@@ -3,6 +3,7 @@ import html
 import re
 import subprocess
 import base64
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -26,8 +27,98 @@ class PageData:
     content_is_html: bool = False
 
 
-def run(cmd: list[str], cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=check, text=True, capture_output=True)
+# 这里用一个 SSH Host alias（~/.ssh/config 里配置）来固定使用正确 key
+# 例如：Host github-common-hosts -> HostName github.com + IdentityFile ~/.ssh/id_ed25519_common_hosts
+PREFERRED_GIT_SSH_HOST = (os.environ.get("PRIVACY_PAGES_SSH_HOST") or "github-common-hosts").strip() or "github-common-hosts"
+DEFAULT_PAGES_SSH_KEY = Path("~/.ssh/id_ed25519_common_hosts").expanduser()
+
+
+def run(
+    cmd: list[str],
+    cwd: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """运行命令；失败就打印 stdout/stderr 并抛出。"""
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
+
+    p = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        env=merged_env,
+    )
+    if check and p.returncode != 0:
+        out = (p.stdout or "").strip()
+        err = (p.stderr or "").strip()
+        if out:
+            print(out)
+        if err:
+            print(err)
+        raise subprocess.CalledProcessError(p.returncode, cmd, output=p.stdout, stderr=p.stderr)
+    return p
+
+
+def _resolve_pages_ssh_key() -> Optional[Path]:
+    """Resolve which SSH key to use for git push.
+
+    Priority:
+      1) env PRIVACY_PAGES_SSH_KEY
+      2) DEFAULT_PAGES_SSH_KEY
+    """
+    env_key = (os.environ.get("PRIVACY_PAGES_SSH_KEY") or "").strip()
+    if env_key:
+        return Path(env_key).expanduser()
+    return DEFAULT_PAGES_SSH_KEY if DEFAULT_PAGES_SSH_KEY.exists() else None
+
+
+def _git_env_for_pages_push() -> dict[str, str]:
+    """Force git to use the intended SSH identity.
+
+    This prevents `git push` from accidentally selecting another key (multi-account 常见坑)。
+    """
+    key_path = _resolve_pages_ssh_key()
+    if not key_path:
+        return {}
+
+    return {
+        "GIT_SSH_COMMAND": (
+            f"ssh -i {str(key_path)} "
+            f"-o IdentitiesOnly=yes "
+            f"-o StrictHostKeyChecking=accept-new"
+        )
+    }
+
+
+def _rewrite_remote_to_preferred_host(remote_url: str) -> str:
+    """Rewrite git SSH remote to use our preferred Host alias.
+
+    Example:
+      git@github.com:common-hosts/privacy-page.git
+      ->
+      git@github-common-hosts:common-hosts/privacy-page.git
+
+    If remote isn't SSH, or already uses the preferred alias, return as-is.
+    """
+    u = (remote_url or "").strip()
+    if not u:
+        return u
+
+    m = re.match(r"^git@([^:]+):(.+)$", u)
+    if not m:
+        return u
+
+    host, rest = m.group(1), m.group(2)
+    if host == PREFERRED_GIT_SSH_HOST:
+        return u
+
+    if host == "github.com":
+        return f"git@{PREFERRED_GIT_SSH_HOST}:{rest}"
+
+    return u
 
 
 def get_git_remote_url(remote: str = "origin") -> str:
@@ -38,12 +129,60 @@ def get_git_remote_url(remote: str = "origin") -> str:
         return ""
 
 
+def _ensure_origin_uses_preferred_host() -> None:
+    remote_url = get_git_remote_url("origin")
+    if not remote_url:
+        return
+    new_url = _rewrite_remote_to_preferred_host(remote_url)
+    if new_url != remote_url:
+        run(["git", "remote", "set-url", "origin", new_url], cwd=REPO_ROOT)
+
+
+def _ensure_git_identity() -> None:
+    """Prevent commit failures when user.name/user.email not configured."""
+
+    def _cfg(key: str) -> str:
+        p = subprocess.run(
+            ["git", "config", "--get", key],
+            cwd=str(REPO_ROOT),
+            text=True,
+            capture_output=True,
+        )
+        return (p.stdout or "").strip()
+
+    name = _cfg("user.name")
+    email = _cfg("user.email")
+    if not name:
+        run(["git", "config", "user.name", "privacy-bot"], cwd=REPO_ROOT)
+    if not email:
+        run(
+            ["git", "config", "user.email", "privacy-bot@users.noreply.github.com"],
+            cwd=REPO_ROOT,
+        )
+
+
 def get_repo_slug_from_remote(remote_url: str) -> str:
-    """Extract owner/repo from git remote (ssh or https)."""
-    m = re.search(r"github\.com[:/](?P<slug>[^/]+/[^/]+?)(?:\.git)?$", remote_url.strip())
-    if not m:
+    """Extract owner/repo from git remote url.
+
+    Supported:
+      - SSH: git@github.com:owner/repo.git
+      - HTTPS: https://github.com/owner/repo.git
+    """
+    u = (remote_url or "").strip()
+    if not u:
         raise ValueError(f"Unsupported remote url: {remote_url!r}")
-    return m.group("slug")
+
+    # SSH
+    m = re.match(r"^git@[^:]+:([^/]+)/(.+?)(?:\.git)?$", u)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    # HTTPS
+    m = re.match(r"^https?://[^/]+/([^/]+)/(.+?)(?:\.git)?/?$", u)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    raise ValueError(f"Unsupported remote url: {remote_url!r}")
 
 
 def github_pages_base_url(repo_slug: str) -> str:
@@ -54,9 +193,7 @@ def github_pages_base_url(repo_slug: str) -> str:
 def slugify(s: str) -> str:
     """Generate safe path slug for GitHub Pages URL."""
     s = (s or "").strip().lower()
-    # spaces/underscores -> hyphen
     s = re.sub(r"[\s_]+", "-", s)
-    # keep alnum and hyphen only
     s = re.sub(r"[^a-z0-9\-]+", "-", s)
     s = re.sub(r"-+", "-", s).strip("-")
     return s or "privacy-policy"
@@ -77,24 +214,20 @@ def encode_id_to_base64_letters(raw_id: str) -> str:
     if not raw:
         return ""
     b = raw.encode("utf-8")
-    # urlsafe_b64encode 会用 - _ 替代 + /
-    s = base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
-    return s
+    return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
 
 
 def strip_leading_privacy_policy(text: str) -> str:
-    """去掉正文最前面的 'Privacy Policy' + 空行（来自生成器的首行），避免页面出现重复标题。"""
+    """去掉正文最前面的 'Privacy Policy' + 空行，避免页面出现重复标题。"""
     if not text:
         return ""
     t = text.lstrip("\ufeff\n\r\t ")
-    # 匹配：Privacy Policy\n\n...
     if re.match(r"(?is)^privacy\s*policy\s*(\n|\r\n)\s*(\n|\r\n)", t):
         t = re.sub(r"(?is)^privacy\s*policy\s*(\n|\r\n)\s*(\n|\r\n)", "", t, count=1)
     return t
 
 
 def render_html(page: PageData) -> str:
-    # 先做正文清理（去掉重复的 Privacy Policy 开头）
     content_source = page.content
     if not page.content_is_html:
         content_source = strip_leading_privacy_policy(content_source)
@@ -113,28 +246,37 @@ def write_privacy_page(page: PageData, page_slug: str) -> Path:
 
 
 def write_root_landing(latest_url: str) -> None:
-    """Keep root index.html as a simple redirect to latest page (optional but useful)."""
-    landing = f"""<html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0; url={html.escape(latest_url)}\"></head>
-<body>Redirecting to <a href=\"{html.escape(latest_url)}\">{html.escape(latest_url)}</a>...</body></html>\n"""
+    landing = (
+        f"<html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0; url={html.escape(latest_url)}\"></head>\n"
+        f"<body>Redirecting to <a href=\"{html.escape(latest_url)}\">{html.escape(latest_url)}</a>...</body></html>\n"
+    )
     INDEX_HTML_PATH.write_text(landing, encoding="utf-8")
-
-
-def git_commit_push(commit_message: str = DEFAULT_COMMIT_MESSAGE) -> None:
-    run(["git", "add", "pages", "index.html"], cwd=REPO_ROOT)
-
-    status = run(["git", "status", "--porcelain"], cwd=REPO_ROOT).stdout.strip()
-    if not status:
-        print("ℹ️ No git changes to commit.")
-        return
-
-    run(["git", "commit", "-m", commit_message], cwd=REPO_ROOT)
-
-    branch = run(["git", "branch", "--show-current"], cwd=REPO_ROOT).stdout.strip() or "main"
-    run(["git", "push", "origin", branch], cwd=REPO_ROOT)
 
 
 def read_content_from_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def git_commit_push(commit_message: str) -> None:
+    """git add/commit/push; if nothing to commit, skip commit step."""
+    _ensure_origin_uses_preferred_host()
+    _ensure_git_identity()
+
+    run(["git", "add", "-A"], cwd=REPO_ROOT)
+
+    # 如果没有变更，commit 会 exit 1；这里先检测一下
+    st = run(["git", "status", "--porcelain"], cwd=REPO_ROOT, check=False)
+    if not (st.stdout or "").strip():
+        print("ℹ️ 没有文件变更，跳过 commit。")
+    else:
+        run(["git", "commit", "-m", commit_message], cwd=REPO_ROOT)
+
+    # push 必须带 env，强制使用对应 key
+    env = _git_env_for_pages_push()
+    # 获取当前分支名
+    b = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT)
+    branch = (b.stdout or "main").strip() or "main"
+    run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
 
 
 def main():
@@ -157,7 +299,6 @@ def main():
     content = args.content or read_content_from_file(Path(args.content_file).expanduser())
     page = PageData(title=args.title, content=content, content_is_html=bool(args.content_is_html))
 
-    # 生成 slug：优先使用 --slug，否则用 (base64(id) + '-' + slugify(title))
     if args.slug:
         page_slug = slugify(args.slug)
     else:
@@ -185,9 +326,19 @@ def main():
         print("ℹ️ --no-push used. Skipping git commit/push.")
         return
 
-    git_commit_push(args.commit_message)
-    print("✅ Committed and pushed.")
-    print(f"\nOpen: {page_url}")
+    try:
+        git_commit_push(args.commit_message)
+        print("✅ Committed and pushed.")
+        print(f"\nOpen: {page_url}")
+    except subprocess.CalledProcessError as e:
+        # 这里把 git 的 stderr 打出来，给 Permission denied 等错误更清晰
+        err = (e.stderr or "").strip()
+        out = (e.output or "").strip()
+        if out:
+            print(out)
+        if err:
+            print(err)
+        raise SystemExit(f"命令失败: {e.cmd} (exit {e.returncode})")
 
 
 if __name__ == "__main__":
