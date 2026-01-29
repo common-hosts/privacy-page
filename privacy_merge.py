@@ -388,14 +388,37 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
     p = subprocess.run(cmd, env=env, text=True, capture_output=True)
     combined = (p.stdout or "") + ("\n" + (p.stderr or "") if p.stderr else "")
 
+    # 把 googleSites.py 的输出也打印出来，避免“复制后没反应”
+    if combined.strip():
+        print("------ googleSites.py 输出开始 ------")
+        print(combined.strip())
+        print("------ googleSites.py 输出结束 ------")
+
     # 从输出里提取 URL（googleSites.py 会打印 🌐 Page URL: ...）
     m = re.search(r"(https?://[^\s]+/pages/[^\s]+/)", combined)
     page_url = m.group(1) if m else ""
 
+    # 如果 googleSites.py 没能成功 push 或者你在 IDE 里只提交未 push，会导致新目录不在远端 -> 404
+    # 所以这里再兜底检查一次：如果本地领先 origin/main，就强制 push。
+    try:
+        cnt = subprocess.run(
+            ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"],
+            cwd=str(Path(__file__).resolve().parent),
+            text=True,
+            capture_output=True,
+        )
+        if cnt.returncode == 0:
+            parts = (cnt.stdout or "").strip().split()
+            if len(parts) == 2:
+                behind, ahead = int(parts[0]), int(parts[1])
+                if ahead > 0:
+                    print(f"🔁 检测到本地有 {ahead} 个提交未推送，自动执行 git push...")
+                    subprocess.run(["git", "push", "origin", "main"], cwd=str(Path(__file__).resolve().parent), check=False)
+    except Exception:
+        pass
+
     if p.returncode != 0:
         print("❌ 自动发布到 GitHub Pages 失败（googleSites.py 返回非 0）。")
-        if combined.strip():
-            print(combined.strip())
         # fallback：至少把本地提交推到远端，避免用户误以为已发布
         print("🔁 fallback：尝试执行一次 `git push origin main`...")
         try:
@@ -500,6 +523,8 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
         publish_url = publish_privacy_page_to_github(app_title, publish_id, PRIVACY_TEXT_OUT)
         if publish_url:
             print(f"🌐 已发布网页地址: {publish_url}")
+        else:
+            print("⚠️ 未能从发布输出中提取 URL（但通常已发布成功，请看上面的 googleSites.py 输出）。")
     except Exception as e:
         print(f"⚠️ 自动发布到 GitHub Pages 失败（不影响后续流程）: {e}")
 
