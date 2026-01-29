@@ -4,6 +4,8 @@ import re
 import subprocess
 import base64
 import os
+import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -324,6 +326,31 @@ def git_commit_push(commit_message: str) -> None:
         raise
 
 
+def wait_until_url_ready(url: str, timeout_seconds: int = 120, interval_seconds: float = 3.0) -> bool:
+    """Poll the published GitHub Pages URL until it returns HTTP 200.
+
+    GitHub Pages often has a small build/deploy delay. This prevents the
+    "new page 404, old page works" confusion.
+    """
+    end = time.time() + timeout_seconds
+    last_err = ""
+    while time.time() < end:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                if getattr(resp, "status", 200) == 200:
+                    return True
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(interval_seconds)
+
+    if last_err:
+        print(f"⚠️ 页面在 {timeout_seconds}s 内仍不可访问（可能还在部署中）：{last_err}")
+    else:
+        print(f"⚠️ 页面在 {timeout_seconds}s 内仍不可访问（可能还在部署中）。")
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Publish per-app privacy page to GitHub Pages (no overwrite).")
     parser.add_argument("--title", required=True, help="App name (for logging only; page H1/title are fixed)")
@@ -375,6 +402,15 @@ def main():
         git_commit_push(args.commit_message)
         print("✅ Committed and pushed.")
         print(f"\nOpen: {page_url}")
+
+        # 等待 GitHub Pages 部署生效，避免刚发布就 404
+        if base_url:
+            print("⏳ 等待 GitHub Pages 部署生效...")
+            if wait_until_url_ready(page_url, timeout_seconds=180, interval_seconds=4.0):
+                print("✅ 页面已可访问。")
+            else:
+                print("ℹ️ 可能需要再等一会儿再刷新浏览器（GitHub Pages 有部署延迟）。")
+
     except subprocess.CalledProcessError as e:
         # 这里把 git 的 stderr 打出来，给 Permission denied 等错误更清晰
         err = (e.stderr or "").strip()
