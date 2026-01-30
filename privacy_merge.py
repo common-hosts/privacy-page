@@ -844,31 +844,56 @@ def save_to_json(data, filename="none.json"):
 
 import argparse
 
+
 def ensure_github_ssh_keychain_ready(key_path: str = "~/.ssh/id_ed25519_common_hosts") -> None:
-    """One-time friendly helper: load SSH key into macOS Keychain/ssh-agent.
+    """One-time helper: load SSH key into macOS Keychain/ssh-agent.
 
-    Goal: after you enter passphrase once, future runs never ask again.
+    Why you see:
+      Identity added: ...
+    Because ssh-add prints that line to stdout when it loads a key.
+
+    Here we:
+      - detect if the key is already loaded (by comparing the .pub key body)
+      - only run ssh-add when needed
+      - silence ssh-add output to keep logs clean
     """
+
+    def _pub_key_body(pub_text: str) -> str:
+        # pub format: "ssh-ed25519 AAAAC3... comment"
+        parts = (pub_text or "").strip().split()
+        return parts[1] if len(parts) >= 2 else ""
+
     try:
-        kp = str(Path(key_path).expanduser())
-        if not Path(kp).exists():
+        kp = Path(key_path).expanduser()
+        if not kp.exists():
             return
 
-        # If already loaded, nothing to do
-        p = subprocess.run(["ssh-add", "-l"], text=True, capture_output=True)
-        if p.returncode == 0 and (Path(kp).name in (p.stdout or "")):
+        pub_path = Path(str(kp) + ".pub")
+        if not pub_path.exists():
             return
 
-        # Use Keychain integration (macOS only)
-        p = subprocess.run(["ssh-add", "--apple-use-keychain", kp], text=True)
+        want_body = _pub_key_body(pub_path.read_text(encoding="utf-8"))
+        if not want_body:
+            return
+
+        # If already loaded, do nothing
+        p = subprocess.run(["ssh-add", "-L"], text=True, capture_output=True)
+        if p.returncode == 0 and want_body in (p.stdout or ""):
+            return
+
+        # Load into agent/keychain (silence output; avoid noisy 'Identity added ...')
+        p = subprocess.run(
+            ["ssh-add", "--apple-use-keychain", str(kp)],
+            text=True,
+            capture_output=True,
+        )
         if p.returncode != 0:
             print(
                 "⚠️ SSH key 预加载失败。你可以手动执行一次：\n"
                 f"  ssh-add --apple-use-keychain {kp}\n"
-                "输入 passphrase 后，以后就不会再提示。"
+                "输入 passphrase 后，以后脚本运行就不会再提示。"
             )
     except Exception:
-        # Don't block main flow
         pass
 
 
