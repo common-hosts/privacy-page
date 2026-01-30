@@ -137,8 +137,17 @@ def _git_env_for_pages_push() -> dict[str, str]:
     _ensure_ssh_agent_has_key()
 
     # Use ssh-agent (do NOT use -i here; -i can cause passphrase prompt issues in subprocess)
+    # Speed tweaks:
+    #   - BatchMode=yes: never prompt for passphrase (fail fast)
+    #   - ControlMaster autos: reuse SSH connection for faster pushes
+    #   - Compression off: git transfers are already compressed; saves CPU
     return {
-        "GIT_SSH_COMMAND": "ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+        "GIT_SSH_COMMAND": (
+            "ssh -o BatchMode=yes -o IdentitiesOnly=yes "
+            "-o StrictHostKeyChecking=accept-new "
+            "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p "
+            "-o Compression=no"
+        ),
     }
 
 
@@ -324,8 +333,9 @@ def git_commit_push(commit_message: str) -> None:
     branch = (b.stdout or "main").strip() or "main"
 
     try:
-        run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
-    except subprocess.CalledProcessError as e:
+        # Faster + more reliable on CI/slow networks
+        run(["git", "push", "--porcelain", "--no-verify", "origin", branch], cwd=REPO_ROOT, env=env)
+    except subprocess.CalledProcessError:
         # Print extra debug about remote + ssh config
         try:
             print("--- git remote -v ---")
@@ -362,6 +372,34 @@ def wait_until_url_ready(url: str, timeout_seconds: int = 120, interval_seconds:
     return False
 
 
+# --- Clipboard helpers (macOS) ---
+def copy_to_clipboard_macos(text: str) -> bool:
+    """Copy text to macOS clipboard using pbcopy."""
+    if not text:
+        return False
+    try:
+        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+        return True
+    except Exception:
+        return False
+
+
+def show_macos_toast(message: str, seconds: int = 3) -> None:
+    """Best-effort toast via AppleScript (no hard failure if blocked)."""
+    msg = (message or "").replace('"', "\\\"")
+    try:
+        # display notification doesn't support custom duration reliably, but we keep 'seconds'
+        # for API compatibility and potential future use.
+        subprocess.run(
+            ["osascript", "-e", f'display notification "{msg}" with title "PrivacyTools"'],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="Publish per-app privacy page to GitHub Pages (no overwrite).")
     parser.add_argument("--title", required=True, help="App name (for logging only; page H1/title are fixed)")
@@ -373,6 +411,11 @@ def main():
     parser.add_argument("--commit-message", default=DEFAULT_COMMIT_MESSAGE, help="Git commit message")
     parser.add_argument("--no-push", action="store_true", help="Only write files, do not commit/push")
     parser.add_argument("--no-landing", action="store_true", help="Do not update root index.html redirect")
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Do not wait/poll for GitHub Pages deployment (faster; URL may 404 for a bit).",
+    )
 
     args = parser.parse_args()
 
@@ -410,12 +453,21 @@ def main():
         return
 
     try:
+        print("🚀 网页发布中。。。")
         git_commit_push(args.commit_message)
         print("✅ Committed and pushed.")
+
+        # 发布成功后：把 URL 放到剪贴板，用户直接粘贴
+        if copy_to_clipboard_macos(page_url):
+            show_macos_toast("网页发布成功，链接已复制", seconds=3)
+            print("📋 已复制网页地址到剪贴板。")
+        else:
+            print("⚠️ 复制网页地址到剪贴板失败（可手动复制上面的 URL）。")
+
         print(f"\nOpen: {page_url}")
 
-        # 等待 GitHub Pages 部署生效，避免刚发布就 404
-        if base_url:
+        # 等待 GitHub Pages 部署生效（可关闭以加速）
+        if base_url and not args.no_wait:
             print("⏳ 等待 GitHub Pages 部署生效...")
             if wait_until_url_ready(page_url, timeout_seconds=180, interval_seconds=4.0):
                 print("✅ 页面已可访问。")

@@ -520,13 +520,35 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
     # 可选：自动发布到 GitHub Pages（依赖 googleSites.py + git push SSH）
     try:
         app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
+        print("🚀 网页发布中。。。")
         publish_url = publish_privacy_page_to_github(app_title, publish_id, PRIVACY_TEXT_OUT)
         if publish_url:
             print(f"🌐 已发布网页地址: {publish_url}")
+
+            # 再把最终 URL 复制一次，确保用户随手可粘贴
+            try:
+                copy_to_clipboard_macos(publish_url)
+                try:
+                    subprocess.run(
+                        ["osascript", "-e", 'display notification "隐私网页链接已复制" with title "PrivacyTools"'],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
         else:
-            print("⚠️ 未能从发布输出中提取 URL（但通常已发布成功，请看上面的 googleSites.py 输出）。")
+            print("⚠️ 未能从发布输出中提取 URL（但通常仍可能已发布成功，请看 googleSites.py 输出）。")
     except Exception as e:
         print(f"⚠️ 自动发布到 GitHub Pages 失败（不影响后续流程）: {e}")
+
+    # 复制文本完成后，自动关闭网页窗口（不关闭整个脚本）
+    try:
+        driver.close()
+    except Exception:
+        pass
 
     return text
 
