@@ -505,7 +505,7 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
     publish_url = ""
     try:
         app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
-        print("🚀 网页发布中。。。")
+        print("🚀 网页发布中。。。大概十几秒吧。。。")
         publish_url = publish_privacy_page_to_github(app_title=app_title, publish_id=publish_id, content_file=PRIVACY_TEXT_OUT)
 
         if publish_url:
