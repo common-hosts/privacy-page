@@ -360,8 +360,49 @@ def click_next_footer(driver, timeout=5):
     return False
 
 
+def _toast_macos(message: str, title: str = "PrivacyTools") -> None:
+    """macOS 通知（失败也不影响主流程）。"""
+    try:
+        if not message:
+            return
+        subprocess.run(
+            ["osascript", "-e", f'display notification "{message}" with title "{title}"'],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        pass
+
+
+def _close_modal_if_possible(driver) -> None:
+    """尝试关闭弹窗，不行也不报错。"""
+    try:
+        btns = driver.find_elements(By.CSS_SELECTOR, ".modal.is-active .delete")
+        if btns:
+            driver.execute_script("arguments[0].click();", btns[0])
+            time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def _run_git_push_main_with_env() -> None:
+    """用指定 SSH key/host 进行一次推送（避免默认走 git@github.com 触发权限错）。"""
+    env = os.environ.copy()
+    ssh_host = env.get("PRIVACY_PAGES_SSH_HOST", "github-common-hosts")
+    ssh_key = env.get("PRIVACY_PAGES_SSH_KEY", str(Path("~/.ssh/id_ed25519_common_hosts").expanduser()))
+    env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key} -o IdentitiesOnly=yes"
+
+    # 仅在有变更时 push，减少耗时
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=str(Path(__file__).resolve().parent), text=True, capture_output=True)
+    if (status.stdout or "").strip():
+        return
+
+    subprocess.run(["git", "push", ssh_host, "main"], cwd=str(Path(__file__).resolve().parent), env=env, check=False)
+
+
 def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file: Path) -> str:
-    """调用 googleSites.py，把本地生成的 pages/<slug>/index.html 推送到远端并等待可访问。
+    """调用 googleSites.py 生成并推送 pages/<slug>/index.html。
 
     返回：发布后的 page_url（尽最大努力从输出中提取）。
     """
@@ -385,44 +426,23 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
         f"Publish privacy page: {safe_title}",
     ]
 
+    # 这里不要 check=True；让我们能打印 stdout/stderr 给你看
     p = subprocess.run(cmd, env=env, text=True, capture_output=True)
     combined = (p.stdout or "") + ("\n" + (p.stderr or "") if p.stderr else "")
 
-    # 把 googleSites.py 的输出也打印出来，避免“复制后没反应”
     if combined.strip():
         print("------ googleSites.py 输出开始 ------")
         print(combined.strip())
         print("------ googleSites.py 输出结束 ------")
 
-    # 从输出里提取 URL（googleSites.py 会打印 🌐 Page URL: ...）
     m = re.search(r"(https?://[^\s]+/pages/[^\s]+/)", combined)
     page_url = m.group(1) if m else ""
 
-    # 如果 googleSites.py 没能成功 push 或者你在 IDE 里只提交未 push，会导致新目录不在远端 -> 404
-    # 所以这里再兜底检查一次：如果本地领先 origin/main，就强制 push。
-    try:
-        cnt = subprocess.run(
-            ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"],
-            cwd=str(Path(__file__).resolve().parent),
-            text=True,
-            capture_output=True,
-        )
-        if cnt.returncode == 0:
-            parts = (cnt.stdout or "").strip().split()
-            if len(parts) == 2:
-                behind, ahead = int(parts[0]), int(parts[1])
-                if ahead > 0:
-                    print(f"🔁 检测到本地有 {ahead} 个提交未推送，自动执行 git push...")
-                    subprocess.run(["git", "push", "origin", "main"], cwd=str(Path(__file__).resolve().parent), check=False)
-    except Exception:
-        pass
-
+    # 极端情况下 googleSites.py 里 push 失败，这里再用同一个 key/host 兜底推一次
     if p.returncode != 0:
-        print("❌ 自动发布到 GitHub Pages 失败（googleSites.py 返回非 0）。")
-        # fallback：至少把本地提交推到远端，避免用户误以为已发布
-        print("🔁 fallback：尝试执行一次 `git push origin main`...")
+        print("⚠️ googleSites.py 返回非 0，尝试兜底 push 一次...")
         try:
-            subprocess.run(["git", "push", "origin", "main"], cwd=str(Path(__file__).resolve().parent), check=False)
+            _run_git_push_main_with_env()
         except Exception:
             pass
 
@@ -458,120 +478,54 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
         print("❌ 解析结果为空")
         return None
 
-    # 尝试复制到系统剪贴板
+    # 1) 复制隐私文本到剪贴板 + toast
     copy_to_clipboard_macos(text)
+    _toast_macos("隐私文本已复制", title="PrivacyTools")
 
-    # 同时写出到文件，方便后续 GitHub Pages 发布
+    # 2) 写出到文件给 GitHub Pages 发布用
     try:
         PRIVACY_TEXT_OUT.write_text(text, encoding="utf-8")
         print(f"📝 已写入隐私文本到文件: {PRIVACY_TEXT_OUT}")
     except Exception as e:
         print(f"⚠️ 写入隐私文本文件失败: {e}")
 
-    driver.execute_script(
-        """
-        (function(value){
-            let ta = document.getElementById('privacy_plain_textarea');
-            if(!ta){
-                ta = document.createElement('textarea');
-                ta.id = 'privacy_plain_textarea';
-                Object.assign(ta.style,{
-                    position:'fixed',right:'20px',top:'20px',width:'520px',height:'600px',
-                    whiteSpace:'pre-wrap',zIndex:2147483647,fontSize:'12px',padding:'8px',
-                    background:'#fff',border:'1px solid rgba(0,0,0,0.2)',boxShadow:'0 2px 8px rgba(0,0,0,0.15)',
-                    resize:'both'
-                });
-                ta.onclick=function(){this.select();};
-                document.body.appendChild(ta);
-            }
-            ta.value=value;
-            ta.style.display='block';
-            ta.focus();
-            ta.select();
-            let copied=false;
-            try{document.execCommand('copy');copied=true;}catch(e){console.warn('copy failed',e);}
-            if(copied){
-                let toast=document.getElementById('privacy_copy_toast');
-                if(!toast){
-                    toast=document.createElement('div');
-                    toast.id='privacy_copy_toast';
-                    Object.assign(toast.style,{
-                        position:'fixed',bottom:'30px',right:'30px',padding:'10px 18px',
-                        background:'rgba(0,0,0,0.8)',color:'#fff',borderRadius:'6px',
-                        fontSize:'14px',zIndex:2147483647,transition:'opacity 0.3s'
-                    });
-                    document.body.appendChild(toast);
-                }
-                toast.textContent='隐私文本已复制';
-                toast.style.opacity='1';
-                setTimeout(()=>{toast.style.opacity='0';},2000);
-            }
-            console.log('PRIVACY_PLAIN_TEXT_START\\n'+value+'\\nPRIVACY_PLAIN_TEXT_END');
-        })(arguments[0]);
-        """,
-        text,
-    )
-
+    # 3) 控制台日志输出（可查）
     print("------ Privacy Policy 文本开始 ------")
     print(text)
     print("------ Privacy Policy 文本结束 ------")
-    print("------ 已复制到系统剪贴板 (pbcopy) ------")
 
-    # 可选：自动发布到 GitHub Pages（依赖 googleSites.py + git push SSH）
-    try:
-        app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
-        print("🚀 网页发布中。。。")
-        publish_url = publish_privacy_page_to_github(app_title, publish_id, PRIVACY_TEXT_OUT)
-        if publish_url:
-            print(f"🌐 已发布网页地址: {publish_url}")
-
-            # 再把最终 URL 复制一次，确保用户随手可粘贴
-            try:
-                copy_to_clipboard_macos(publish_url)
-                try:
-                    subprocess.run(
-                        ["osascript", "-e", 'display notification "隐私网页链接已复制" with title "PrivacyTools"'],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                    )
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        else:
-            print("⚠️ 未能从发布输出中提取 URL（但通常仍可能已发布成功，请看 googleSites.py 输出）。")
-    except Exception as e:
-        print(f"⚠️ 自动发布到 GitHub Pages 失败（不影响后续流程）: {e}")
-
-    # 复制文本完成后，自动关闭网页窗口（不关闭整个脚本）
+    # 4) 复制完成后关闭网页/弹窗（先关 modal，再关 tab）
+    _close_modal_if_possible(driver)
     try:
         driver.close()
     except Exception:
         pass
 
-    return text
+    # 5) 发布到 GitHub Pages：显示“网页发布中...”，成功后复制 URL + toast
+    publish_url = ""
+    try:
+        app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
+        print("🚀 网页发布中。。。")
+        publish_url = publish_privacy_page_to_github(app_title=app_title, publish_id=publish_id, content_file=PRIVACY_TEXT_OUT)
+
+        if publish_url:
+            print(f"🌐 已发布网页地址: {publish_url}")
+            copy_to_clipboard_macos(publish_url)
+            _toast_macos("隐私网页链接已复制", title="PrivacyTools")
+        else:
+            print("⚠️ 未能从发布输出中提取 URL（但通常仍可能已发布成功，请看 googleSites.py 输出）。")
+    except Exception as e:
+        print(f"❌ 发布网页失败: {e}")
+
+    return publish_url
 
 
+# python
 def run_privacy_flow(driver, target_os="Android", publish_id: str = ""):
-    """
-    执行隐私生成流程（基于 app-privacy-policy-generator）。
-
-    :param driver: selenium WebDriver 实例
-    :param target_os: 目标 OS 字符串，例如 "iOS" / "Android"
-    """
-    global app_name, company_name, email
-
-    # 防止把 WebDriver 或其它对象当成 target_os 传进来
+    # 让 target_os 默认是 Android（且保证类型正确）
     if not isinstance(target_os, str):
         real_type = type(target_os).__name__
-        print(f"❌ target_os 类型错误，期望字符串，实际为: {real_type}")
-        # 尝试回退到默认值
-        target_os = "Android"
-
-    target_os = (target_os or "").strip()
-    if not target_os:
-        print("❌ target_os 为空字符串，使用默认 'Android'")
+        print(f"❌ target_os 类型错误，期望字符串，实际为: {real_type}，将回退为 Android")
         target_os = "Android"
 
     driver.get(PRIVACY_GEN_URL)
@@ -673,7 +627,7 @@ def run_privacy_flow(driver, target_os="Android", publish_id: str = ""):
     if not clicked_priv:
         print("❌ 没有找到 Privacy Policy 按钮")
     extract_and_show_privacy_text(driver, publish_id=publish_id)
-    # return True
+    return True
 
 
 # def create_driver(headless=False, user_data_dir=None, profile_dir=None):

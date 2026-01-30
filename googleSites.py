@@ -133,33 +133,28 @@ def _ensure_ssh_agent_has_key() -> None:
 
 
 def _git_env_for_pages_push() -> dict[str, str]:
-    """Force git to use ssh-agent and prevent key selection issues."""
+    """Force git/ssh to use the right identity and fail fast if key isn't loaded.
+
+    NOTE: We deliberately do not pass '-i' here to avoid triggering interactive passphrase prompts
+    from subprocess. Use ssh-agent + macOS Keychain for non-interactive pushes.
+    """
     _ensure_ssh_agent_has_key()
 
-    # Use ssh-agent (do NOT use -i here; -i can cause passphrase prompt issues in subprocess)
-    # Speed tweaks:
-    #   - BatchMode=yes: never prompt for passphrase (fail fast)
-    #   - ControlMaster autos: reuse SSH connection for faster pushes
-    #   - Compression off: git transfers are already compressed; saves CPU
     return {
         "GIT_SSH_COMMAND": (
             "ssh -o BatchMode=yes -o IdentitiesOnly=yes "
             "-o StrictHostKeyChecking=accept-new "
             "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p "
             "-o Compression=no"
-        ),
+        )
     }
 
 
 def _rewrite_remote_to_preferred_host(remote_url: str) -> str:
-    """Rewrite git SSH remote to use our preferred Host alias.
+    """Rewrite origin remote url to use our SSH host alias.
 
     Example:
-      git@github.com:common-hosts/privacy-page.git
-      ->
-      git@github-common-hosts:common-hosts/privacy-page.git
-
-    If remote isn't SSH, or already uses the preferred alias, return as-is.
+      git@github.com:common-hosts/privacy-page.git  ->  git@github-common-hosts:common-hosts/privacy-page.git
     """
     u = (remote_url or "").strip()
     if not u:
@@ -332,23 +327,22 @@ def git_commit_push(commit_message: str) -> None:
     b = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT)
     branch = (b.stdout or "main").strip() or "main"
 
+    # Push using the preferred host alias (origin should already be rewritten, but keep this robust)
     try:
-        # Faster + more reliable on CI/slow networks
-        run(["git", "push", "--porcelain", "--no-verify", "origin", branch], cwd=REPO_ROOT, env=env)
+        run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
     except subprocess.CalledProcessError:
-        # Print extra debug about remote + ssh config
+        # Print debug info and retry once with porcelain
         try:
             print("--- git remote -v ---")
             rp = subprocess.run(["git", "remote", "-v"], cwd=str(REPO_ROOT), text=True, capture_output=True)
             print((rp.stdout or "").strip())
         except Exception:
             pass
-        print(f"--- GIT_SSH_COMMAND ---\n{env.get('GIT_SSH_COMMAND','')}\n---------------------")
-        raise
+        run(["git", "push", "--porcelain", "--no-verify", "origin", branch], cwd=REPO_ROOT, env=env)
 
 
 def wait_until_url_ready(url: str, timeout_seconds: int = 120, interval_seconds: float = 3.0) -> bool:
-    """Poll the published GitHub Pages URL until it returns HTTP 200.
+    """Poll the published GitHub Pages URL until it returns HTTP 200。
 
     GitHub Pages often has a small build/deploy delay. This prevents the
     "new page 404, old page works" confusion.
@@ -388,8 +382,6 @@ def show_macos_toast(message: str, seconds: int = 3) -> None:
     """Best-effort toast via AppleScript (no hard failure if blocked)."""
     msg = (message or "").replace('"', "\\\"")
     try:
-        # display notification doesn't support custom duration reliably, but we keep 'seconds'
-        # for API compatibility and potential future use.
         subprocess.run(
             ["osascript", "-e", f'display notification "{msg}" with title "PrivacyTools"'],
             check=False,
@@ -410,7 +402,6 @@ def main():
     parser.add_argument("--id", help="Optional raw ID (e.g. IGT1128). If provided, will be encoded into slug prefix.")
     parser.add_argument("--commit-message", default=DEFAULT_COMMIT_MESSAGE, help="Git commit message")
     parser.add_argument("--no-push", action="store_true", help="Only write files, do not commit/push")
-    parser.add_argument("--no-landing", action="store_true", help="Do not update root index.html redirect")
     parser.add_argument(
         "--no-wait",
         action="store_true",
@@ -419,31 +410,32 @@ def main():
 
     args = parser.parse_args()
 
-    if bool(args.content) == bool(args.content_file):
-        raise SystemExit("Please provide exactly one of --content or --content-file")
-
-    content = args.content or read_content_from_file(Path(args.content_file).expanduser())
-    page = PageData(title=args.title, content=content, content_is_html=bool(args.content_is_html))
-
-    if args.slug:
-        page_slug = slugify(args.slug)
+    if args.content_file:
+        content = read_content_from_file(Path(args.content_file))
     else:
-        prefix = encode_id_to_base64_letters(args.id or "")
-        suffix = slugify(args.title)
-        page_slug = f"{prefix}-{suffix}" if prefix else suffix
+        content = args.content or ""
 
+    # Build slug
+    if args.slug:
+        page_slug = args.slug
+    else:
+        id_prefix = encode_id_to_base64_letters(args.id or "")
+        if id_prefix:
+            page_slug = f"{id_prefix}-{slugify(args.title)}"
+        else:
+            page_slug = slugify(args.title)
+
+    page = PageData(title=args.title, content=content, content_is_html=args.content_is_html)
     out_path = write_privacy_page(page, page_slug)
 
-    remote_url = get_git_remote_url("origin")
-    base_url = ""
-    if remote_url:
-        repo_slug = get_repo_slug_from_remote(remote_url)
-        base_url = github_pages_base_url(repo_slug)
+    repo_slug = get_repo_slug_from_remote(get_git_remote_url("origin"))
+    page_url = github_pages_base_url(repo_slug) + f"pages/{page_slug}/"
 
-    page_url = f"{base_url}pages/{page_slug}/" if base_url else f"pages/{page_slug}/"
-
-    if not args.no_landing and base_url:
+    # optional: write root index.html redirect for convenience
+    try:
         write_root_landing(page_url)
+    except Exception:
+        pass
 
     print(f"✅ Wrote privacy page: {out_path}")
     print(f"🌐 Page URL: {page_url}")
@@ -453,21 +445,13 @@ def main():
         return
 
     try:
-        print("🚀 网页发布中。。。")
         git_commit_push(args.commit_message)
-        print("✅ Committed and pushed.")
 
-        # 发布成功后：把 URL 放到剪贴板，用户直接粘贴
+        # give user a quick clipboard copy for convenience
         if copy_to_clipboard_macos(page_url):
-            show_macos_toast("网页发布成功，链接已复制", seconds=3)
-            print("📋 已复制网页地址到剪贴板。")
-        else:
-            print("⚠️ 复制网页地址到剪贴板失败（可手动复制上面的 URL）。")
+            show_macos_toast("发布链接已复制", seconds=3)
 
-        print(f"\nOpen: {page_url}")
-
-        # 等待 GitHub Pages 部署生效（可关闭以加速）
-        if base_url and not args.no_wait:
+        if not args.no_wait:
             print("⏳ 等待 GitHub Pages 部署生效...")
             if wait_until_url_ready(page_url, timeout_seconds=180, interval_seconds=4.0):
                 print("✅ 页面已可访问。")
@@ -475,7 +459,6 @@ def main():
                 print("ℹ️ 可能需要再等一会儿再刷新浏览器（GitHub Pages 有部署延迟）。")
 
     except subprocess.CalledProcessError as e:
-        # 这里把 git 的 stderr 打出来，给 Permission denied 等错误更清晰
         err = (e.stderr or "").strip()
         out = (e.output or "").strip()
         if out:
