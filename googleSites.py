@@ -32,7 +32,7 @@ class PageData:
 # 这里用一个 SSH Host alias（~/.ssh/config 里配置）来固定使用正确 key
 # 例如：Host github-common-hosts -> HostName github.com + IdentityFile ~/.ssh/id_ed25519_common_hosts
 PREFERRED_GIT_SSH_HOST = (os.environ.get("PRIVACY_PAGES_SSH_HOST") or "github-common-hosts").strip() or "github-common-hosts"
-DEFAULT_PAGES_SSH_KEY = Path("~/.ssh/id_ed25519_common_hosts").expanduser()
+DEFAULT_PAGES_SSH_KEY = Path(os.environ.get("PRIVACY_PAGES_SSH_KEY", "~/.ssh/id_ed25519_common_hosts")).expanduser()
 
 
 def run(
@@ -65,15 +65,7 @@ def run(
 
 
 def _resolve_pages_ssh_key() -> Optional[Path]:
-    """Resolve which SSH key to use for git push.
-
-    Priority:
-      1) env PRIVACY_PAGES_SSH_KEY
-      2) DEFAULT_PAGES_SSH_KEY
-    """
-    env_key = (os.environ.get("PRIVACY_PAGES_SSH_KEY") or "").strip()
-    if env_key:
-        return Path(env_key).expanduser()
+    """Resolve which SSH key to use for git push."""
     return DEFAULT_PAGES_SSH_KEY if DEFAULT_PAGES_SSH_KEY.exists() else None
 
 
@@ -88,65 +80,47 @@ def _key_loaded_in_agent(key_path: Path) -> bool:
         p = subprocess.run(["ssh-add", "-L"], text=True, capture_output=True)
         if p.returncode != 0:
             return False
-        return pub.split()[1] in (p.stdout or "")
+        # compare pub key body part
+        parts = pub.split()
+        return len(parts) >= 2 and parts[1] in (p.stdout or "")
     except Exception:
         return False
 
 
 def _ensure_ssh_agent_has_key() -> None:
-    """Ensure ssh-agent is running and has the pages SSH key loaded.
+    """Ensure ssh-agent exists and has the pages SSH key loaded.
 
-    On macOS, the best practice is to store the passphrase in Keychain once,
-    then use ssh-agent non-interactively forever.
-
-    One-time setup (manual):
-      ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts
+    We DO NOT auto-run ssh-add here (it may prompt for passphrase, which would hang
+    when running from scripts). Instead we print a one-time setup hint.
     """
     key_path = _resolve_pages_ssh_key()
     if not key_path:
         return
 
-    # Start agent if needed
-    if not os.environ.get("SSH_AUTH_SOCK"):
-        p = subprocess.run(["ssh-agent", "-s"], text=True, capture_output=True)
-        out = p.stdout or ""
-        m_sock = re.search(r"SSH_AUTH_SOCK=([^;]+);", out)
-        m_pid = re.search(r"SSH_AGENT_PID=(\d+);", out)
-        if m_sock:
-            os.environ["SSH_AUTH_SOCK"] = m_sock.group(1)
-        if m_pid:
-            os.environ["SSH_AGENT_PID"] = m_pid.group(1)
-
-    # Already loaded?
+    # If already loaded, do nothing
     if _key_loaded_in_agent(key_path):
         return
 
-    # IMPORTANT: do not trigger an interactive passphrase prompt from a subprocess.
-    # If key isn't available yet, print a clear one-time setup instruction.
-    hint = (
-        "\n⚠️ SSH key 未在 ssh-agent 中加载，且脚本不会在后台弹出口令输入。\n"
+    print(
+        "\n⚠️ 当前环境的 ssh-agent 里还没有加载 GitHub Pages 的 SSH key，脚本将无法自动 push。\n"
         "请在终端手动执行一次（只需一次）：\n"
-        "  ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts\n"
-        "之后再运行脚本即可做到全自动 push。\n"
+        f"  ssh-add --apple-use-keychain {key_path}\n"
+        "输入 passphrase 后，会保存到 Keychain，之后运行脚本就不会再提示。\n"
     )
-    print(hint)
 
 
 def _git_env_for_pages_push() -> dict[str, str]:
-    """Force git/ssh to use the right identity and fail fast if key isn't loaded.
-
-    NOTE: We deliberately do not pass '-i' here to avoid triggering interactive passphrase prompts
-    from subprocess. Use ssh-agent + macOS Keychain for non-interactive pushes.
-    """
+    """Force git/ssh to use the right identity non-interactively."""
     _ensure_ssh_agent_has_key()
-
+    # BatchMode=yes => never prompt for passphrase in subprocess (fail fast with clear error)
     return {
         "GIT_SSH_COMMAND": (
             "ssh -o BatchMode=yes -o IdentitiesOnly=yes "
             "-o StrictHostKeyChecking=accept-new "
-            "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p "
-            "-o Compression=no"
-        )
+            "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p"
+        ),
+        # speedups
+        "GIT_PROTOCOL": "version=2",
     }
 
 
@@ -311,7 +285,7 @@ def read_content_from_file(path: Path) -> str:
 
 
 def git_commit_push(commit_message: str) -> None:
-    """git add/commit/push; if nothing to commit, skip commit step."""
+    """git add/commit/push; if nothing to commit, still push to be safe."""
     _ensure_origin_uses_preferred_host()
     _ensure_git_identity()
 
@@ -327,18 +301,8 @@ def git_commit_push(commit_message: str) -> None:
     b = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT)
     branch = (b.stdout or "main").strip() or "main"
 
-    # Push using the preferred host alias (origin should already be rewritten, but keep this robust)
-    try:
-        run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
-    except subprocess.CalledProcessError:
-        # Print debug info and retry once with porcelain
-        try:
-            print("--- git remote -v ---")
-            rp = subprocess.run(["git", "remote", "-v"], cwd=str(REPO_ROOT), text=True, capture_output=True)
-            print((rp.stdout or "").strip())
-        except Exception:
-            pass
-        run(["git", "push", "--porcelain", "--no-verify", "origin", branch], cwd=REPO_ROOT, env=env)
+    # Push using origin (already rewritten to preferred host).
+    run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
 
 
 def wait_until_url_ready(url: str, timeout_seconds: int = 120, interval_seconds: float = 3.0) -> bool:
@@ -451,6 +415,7 @@ def main():
         if copy_to_clipboard_macos(page_url):
             show_macos_toast("发布链接已复制", seconds=3)
 
+        # Default speed: don't wait unless user explicitly wants it
         if not args.no_wait:
             print("⏳ 等待 GitHub Pages 部署生效...")
             if wait_until_url_ready(page_url, timeout_seconds=180, interval_seconds=4.0):

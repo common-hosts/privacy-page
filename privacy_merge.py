@@ -386,25 +386,75 @@ def _close_modal_if_possible(driver) -> None:
         pass
 
 
+# 
+# GitHub Pages / SSH helpers
+# 
+
+
+def ensure_github_ssh_keychain_ready(key_path: str = "~/.ssh/id_ed25519_common_hosts") -> None:
+    """Teammate-friendly: don't spam `ssh-add` output and don't block on passphrase.
+
+    We only *check* whether key is loaded. If not loaded, we print a one-time hint.
+    Loading should be done manually once:
+      ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts
+    """
+
+    def _pub_key_body(pub_text: str) -> str:
+        parts = (pub_text or "").strip().split()
+        return parts[1] if len(parts) >= 2 else ""
+
+    try:
+        kp = Path(key_path).expanduser()
+        if not kp.exists():
+            return
+
+        pub_path = Path(str(kp) + ".pub")
+        if not pub_path.exists():
+            return
+
+        want_body = _pub_key_body(pub_path.read_text(encoding="utf-8"))
+        if not want_body:
+            return
+
+        p = subprocess.run(["ssh-add", "-L"], text=True, capture_output=True)
+        if p.returncode == 0 and want_body in (p.stdout or ""):
+            return
+
+        print(
+            "\n⚠️ 检测到 GitHub Pages 的 SSH key 还未加载到 ssh-agent（或未保存到 Keychain）。\n"
+            "请在终端手动执行一次（只需一次）：\n"
+            f"  ssh-add --apple-use-keychain {kp}\n"
+            "输入 passphrase 后，以后脚本运行就不会再提示。\n"
+        )
+    except Exception:
+        pass
+
+
 def _run_git_push_main_with_env() -> None:
-    """用指定 SSH key/host 进行一次推送（避免默认走 git@github.com 触发权限错）。"""
+    """Best-effort fallback push using the preferred SSH host alias.
+
+    Note: We do NOT pass '-i key' here to avoid interactive passphrase prompts.
+    Use ssh-agent+Keychain for non-interactive use.
+    """
     env = os.environ.copy()
-    ssh_host = env.get("PRIVACY_PAGES_SSH_HOST", "github-common-hosts")
-    ssh_key = env.get("PRIVACY_PAGES_SSH_KEY", str(Path("~/.ssh/id_ed25519_common_hosts").expanduser()))
-    env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key} -o IdentitiesOnly=yes"
+    env.setdefault("PRIVACY_PAGES_SSH_HOST", "github-common-hosts")
 
-    # 仅在有变更时 push，减少耗时
-    status = subprocess.run(["git", "status", "--porcelain"], cwd=str(Path(__file__).resolve().parent), text=True, capture_output=True)
-    if (status.stdout or "").strip():
-        return
+    env["GIT_SSH_COMMAND"] = (
+        "ssh -o BatchMode=yes -o IdentitiesOnly=yes "
+        "-o StrictHostKeyChecking=accept-new "
+        "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p"
+    )
 
-    subprocess.run(["git", "push", ssh_host, "main"], cwd=str(Path(__file__).resolve().parent), env=env, check=False)
+    repo_root = Path(__file__).resolve().parent
+
+    # push regardless of status (commit may already exist)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(repo_root), env=env, check=False)
 
 
 def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file: Path) -> str:
-    """调用 googleSites.py 生成并推送 pages/<slug>/index.html。
+    """Call googleSites.py to generate & push pages/<slug>/index.html.
 
-    返回：发布后的 page_url（尽最大努力从输出中提取）。
+    Return: published page URL (best-effort parsed).
     """
     env = os.environ.copy()
     env.setdefault("PRIVACY_PAGES_SSH_HOST", "github-common-hosts")
@@ -424,9 +474,9 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
         str(content_file),
         "--commit-message",
         f"Publish privacy page: {safe_title}",
+        "--no-wait",
     ]
 
-    # 这里不要 check=True；让我们能打印 stdout/stderr 给你看
     p = subprocess.run(cmd, env=env, text=True, capture_output=True)
     combined = (p.stdout or "") + ("\n" + (p.stderr or "") if p.stderr else "")
 
@@ -438,7 +488,6 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
     m = re.search(r"(https?://[^\s]+/pages/[^\s]+/)", combined)
     page_url = m.group(1) if m else ""
 
-    # 极端情况下 googleSites.py 里 push 失败，这里再用同一个 key/host 兜底推一次
     if p.returncode != 0:
         print("⚠️ googleSites.py 返回非 0，尝试兜底 push 一次...")
         try:
@@ -449,7 +498,6 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
     return page_url
 
 
-# python
 def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = ""):
     driver.switch_to.default_content()
     try:
@@ -845,60 +893,8 @@ def save_to_json(data, filename="none.json"):
 import argparse
 
 
-def ensure_github_ssh_keychain_ready(key_path: str = "~/.ssh/id_ed25519_common_hosts") -> None:
-    """One-time helper: load SSH key into macOS Keychain/ssh-agent.
-
-    Why you see:
-      Identity added: ...
-    Because ssh-add prints that line to stdout when it loads a key.
-
-    Here we:
-      - detect if the key is already loaded (by comparing the .pub key body)
-      - only run ssh-add when needed
-      - silence ssh-add output to keep logs clean
-    """
-
-    def _pub_key_body(pub_text: str) -> str:
-        # pub format: "ssh-ed25519 AAAAC3... comment"
-        parts = (pub_text or "").strip().split()
-        return parts[1] if len(parts) >= 2 else ""
-
-    try:
-        kp = Path(key_path).expanduser()
-        if not kp.exists():
-            return
-
-        pub_path = Path(str(kp) + ".pub")
-        if not pub_path.exists():
-            return
-
-        want_body = _pub_key_body(pub_path.read_text(encoding="utf-8"))
-        if not want_body:
-            return
-
-        # If already loaded, do nothing
-        p = subprocess.run(["ssh-add", "-L"], text=True, capture_output=True)
-        if p.returncode == 0 and want_body in (p.stdout or ""):
-            return
-
-        # Load into agent/keychain (silence output; avoid noisy 'Identity added ...')
-        p = subprocess.run(
-            ["ssh-add", "--apple-use-keychain", str(kp)],
-            text=True,
-            capture_output=True,
-        )
-        if p.returncode != 0:
-            print(
-                "⚠️ SSH key 预加载失败。你可以手动执行一次：\n"
-                f"  ssh-add --apple-use-keychain {kp}\n"
-                "输入 passphrase 后，以后脚本运行就不会再提示。"
-            )
-    except Exception:
-        pass
-
-
 if __name__ == "__main__":
-    # 在真正运行 git push 之前先尝试预加载一次
+    # 在运行 push 之前只做一次检查：如果 key 没加载，会提示同事执行一次 ssh-add
     ensure_github_ssh_keychain_ready()
 
     parser = argparse.ArgumentParser()
