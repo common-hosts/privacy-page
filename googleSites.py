@@ -110,16 +110,19 @@ def _ensure_ssh_agent_has_key() -> None:
 
 
 def _git_env_for_pages_push() -> dict[str, str]:
-    """Force git/ssh to use the right identity non-interactively."""
+    """Force git/ssh to use the right identity non-interactively.
+
+    Note:
+      - BatchMode=yes => never prompt for passphrase. If the key isn't loaded in ssh-agent,
+        git push will fail fast with a clear error.
+    """
     _ensure_ssh_agent_has_key()
-    # BatchMode=yes => never prompt for passphrase in subprocess (fail fast with clear error)
     return {
         "GIT_SSH_COMMAND": (
             "ssh -o BatchMode=yes -o IdentitiesOnly=yes "
             "-o StrictHostKeyChecking=accept-new "
             "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p"
         ),
-        # speedups
         "GIT_PROTOCOL": "version=2",
     }
 
@@ -189,7 +192,7 @@ def _ensure_git_identity() -> None:
 
 
 def get_repo_slug_from_remote(remote_url: str) -> str:
-    """Extract owner/repo from git remote url.
+    r"""Extract owner/repo from git remote url.
 
     Supported:
       - SSH: git@github.com:owner/repo.git
