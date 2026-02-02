@@ -576,6 +576,17 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
             print(f"🌐 已发布网页地址: {publish_url}")
             copy_to_clipboard_macos(publish_url)
             _toast_macos("隐私网页链接已复制", title="PrivacyTools")
+
+            # 6) 发布成功后清理不再需要的文件（根目录 index.html + privacy_text.txt）
+            try:
+                repo_root = Path(__file__).resolve().parent
+                cleanup_paths = [repo_root / "index.html", repo_root / "privacy_text.txt"]
+                for p in cleanup_paths:
+                    if p.exists():
+                        p.unlink()
+                        print(f"🧹 已删除无用文件: {p}")
+            except Exception as e:
+                print(f"⚠️ 清理文件失败（可忽略）: {e}")
         else:
             print("⚠️ 未能从发布输出中提取 URL（但通常仍可能已发布成功，请看 googleSites.py 输出）。")
     except Exception as e:
