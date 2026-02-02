@@ -35,6 +35,16 @@ PREFERRED_GIT_SSH_HOST = (os.environ.get("PRIVACY_PAGES_SSH_HOST") or "github-co
 DEFAULT_PAGES_SSH_KEY = Path(os.environ.get("PRIVACY_PAGES_SSH_KEY", "~/.ssh/id_ed25519_common_hosts")).expanduser()
 
 
+def _decode_bytes(b: bytes | None) -> str:
+    if not b:
+        return ""
+    try:
+        return b.decode("utf-8", errors="replace")
+    except Exception:
+        # absolute fallback
+        return b.decode(errors="replace")
+
+
 def run(
     cmd: list[str],
     cwd: Optional[Path] = None,
@@ -43,8 +53,8 @@ def run(
 ) -> subprocess.CompletedProcess:
     """运行命令；失败就打印 stdout/stderr 并抛出。
 
-    Windows 上默认控制台编码可能是 GBK，git 输出里如果出现 utf-8 字符会触发
-    UnicodeDecodeError。这里统一用 utf-8 解码并用 replace 兜底，保证不会崩。
+    Windows 上 git 输出可能包含非本地代码页字符，text=True 可能在后台线程里触发
+    UnicodeDecodeError（gbk 解码失败）。这里改为二进制捕获，再手动用 UTF-8 安全解码。
     """
     merged_env = os.environ.copy()
     if env:
@@ -53,12 +63,14 @@ def run(
     p = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         capture_output=True,
         env=merged_env,
     )
+
+    # attach decoded text versions for our own printing/logic
+    p.stdout = _decode_bytes(p.stdout)  # type: ignore[attr-defined]
+    p.stderr = _decode_bytes(p.stderr)  # type: ignore[attr-defined]
+
     if check and p.returncode != 0:
         out = (p.stdout or "").strip()
         err = (p.stderr or "").strip()
@@ -67,6 +79,7 @@ def run(
         if err:
             print(err)
         raise subprocess.CalledProcessError(p.returncode, cmd, output=p.stdout, stderr=p.stderr)
+
     return p
 
 
@@ -83,12 +96,16 @@ def _key_loaded_in_agent(key_path: Path) -> bool:
         pub = pub_path.read_text(encoding="utf-8").strip()
         if not pub:
             return False
-        p = subprocess.run(["ssh-add", "-L"], text=True, capture_output=True)
+
+        p = subprocess.run(["ssh-add", "-L"], capture_output=True)
         if p.returncode != 0:
             return False
+
+        out = _decode_bytes(p.stdout)
+
         # compare pub key body part
         parts = pub.split()
-        return len(parts) >= 2 and parts[1] in (p.stdout or "")
+        return len(parts) >= 2 and parts[1] in (out or "")
     except Exception:
         return False
 
@@ -181,10 +198,9 @@ def _ensure_git_identity() -> None:
         p = subprocess.run(
             ["git", "config", "--get", key],
             cwd=str(REPO_ROOT),
-            text=True,
             capture_output=True,
         )
-        return (p.stdout or "").strip()
+        return _decode_bytes(p.stdout).strip()
 
     name = _cfg("user.name")
     email = _cfg("user.email")
