@@ -310,11 +310,22 @@ def read_content_from_file(path: Path) -> str:
 
 
 def git_commit_push(commit_message: str) -> None:
-    """git add/commit/push; if nothing to commit, still push to be safe."""
+    """git add/commit/push; only commit the files we own.
+
+    We intentionally DO NOT commit unrelated local changes.
+    """
     _ensure_origin_uses_preferred_host()
     _ensure_git_identity()
 
-    run(["git", "add", "-A"], cwd=REPO_ROOT)
+    # Only stage what this tool controls
+    paths_to_add = [
+        "googleSites.py",
+        "privacy_merge.py",
+        "privacy_text.txt",
+        "index.html",
+        "pages",
+    ]
+    run(["git", "add", "--"] + paths_to_add, cwd=REPO_ROOT)
 
     st = run(["git", "status", "--porcelain"], cwd=REPO_ROOT, check=False)
     if not (st.stdout or "").strip():

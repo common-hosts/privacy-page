@@ -391,6 +391,22 @@ def _close_modal_if_possible(driver) -> None:
 # 
 
 
+def _decode_bytes(b: bytes | None) -> str:
+    """Decode subprocess output safely (avoid Windows GBK crashes)."""
+    if not b:
+        return ""
+    try:
+        return b.decode("utf-8", errors="replace")
+    except Exception:
+        return b.decode(errors="replace")
+
+
+def _run_capture(cmd: list[str], *, env: dict | None = None, cwd: str | None = None) -> tuple[int, str, str]:
+    """Run a command and capture stdout/stderr safely (bytes -> utf-8 replace)."""
+    p = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True)
+    return p.returncode, _decode_bytes(p.stdout), _decode_bytes(p.stderr)
+
+
 def ensure_github_ssh_keychain_ready(key_path: str = "~/.ssh/id_ed25519_common_hosts") -> None:
     """Teammate-friendly: don't spam `ssh-add` output and don't block on passphrase.
 
@@ -416,8 +432,8 @@ def ensure_github_ssh_keychain_ready(key_path: str = "~/.ssh/id_ed25519_common_h
         if not want_body:
             return
 
-        p = subprocess.run(["ssh-add", "-L"], text=True, capture_output=True)
-        if p.returncode == 0 and want_body in (p.stdout or ""):
+        ret, out, _err = _run_capture(["ssh-add", "-L"])
+        if ret == 0 and want_body in (out or ""):
             return
 
         print(
@@ -477,8 +493,8 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
         "--no-wait",
     ]
 
-    p = subprocess.run(cmd, env=env, text=True, capture_output=True)
-    combined = (p.stdout or "") + ("\n" + (p.stderr or "") if p.stderr else "")
+    rc, stdout, stderr = _run_capture(cmd, env=env)
+    combined = (stdout or "") + ("\n" + (stderr or "") if stderr else "")
 
     if combined.strip():
         print("------ googleSites.py 输出开始 ------")
@@ -488,7 +504,7 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
     m = re.search(r"(https?://[^\s]+/pages/[^\s]+/)", combined)
     page_url = m.group(1) if m else ""
 
-    if p.returncode != 0:
+    if rc != 0:
         print("⚠️ googleSites.py 返回非 0，尝试兜底 push 一次...")
         try:
             _run_git_push_main_with_env()
