@@ -41,7 +41,11 @@ def run(
     env: Optional[dict[str, str]] = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess:
-    """运行命令；失败就打印 stdout/stderr 并抛出。"""
+    """运行命令；失败就打印 stdout/stderr 并抛出。
+
+    Windows 上默认控制台编码可能是 GBK，git 输出里如果出现 utf-8 字符会触发
+    UnicodeDecodeError。这里统一用 utf-8 解码并用 replace 兜底，保证不会崩。
+    """
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
@@ -50,6 +54,8 @@ def run(
         cmd,
         cwd=str(cwd) if cwd else None,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         env=merged_env,
     )
