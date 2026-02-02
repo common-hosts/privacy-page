@@ -312,32 +312,39 @@ def read_content_from_file(path: Path) -> str:
 def git_commit_push(commit_message: str) -> None:
     """git add/commit/push; only commit the files we own.
 
-    We intentionally DO NOT commit unrelated local changes.
+    Team-friendly behavior:
+      1) Pull/rebase first to avoid non-fast-forward errors.
+      2) Only stage/commit privacy_merge.py + googleSites.py + pages/**
+         (do NOT commit root index.html or privacy_text.txt).
     """
     _ensure_origin_uses_preferred_host()
     _ensure_git_identity()
 
-    # Only stage what this tool controls
+    # 1) Pull first (best effort). If no upstream yet, skip.
+    env = _git_env_for_pages_push()
+    try:
+        # If upstream isn't set, this will fail; we ignore it.
+        run(["git", "pull", "--rebase", "--autostash"], cwd=REPO_ROOT, env=env, check=False)
+    except Exception:
+        pass
+
+    # 2) Only stage what this tool should manage
     paths_to_add = [
         "googleSites.py",
         "privacy_merge.py",
-        "privacy_text.txt",
-        "index.html",
         "pages",
     ]
     run(["git", "add", "--"] + paths_to_add, cwd=REPO_ROOT)
 
     st = run(["git", "status", "--porcelain"], cwd=REPO_ROOT, check=False)
     if not (st.stdout or "").strip():
-        print("ℹ️ 没有文件变更，跳过 commit。")
+        print("ℹ️ 没有需要提交的变更（googleSites.py/privacy_merge.py/pages/），跳过 commit。")
     else:
         run(["git", "commit", "-m", commit_message], cwd=REPO_ROOT)
 
-    env = _git_env_for_pages_push()
+    # 3) Push using origin (already rewritten to preferred host).
     b = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT)
     branch = (b.stdout or "main").strip() or "main"
-
-    # Push using origin (already rewritten to preferred host).
     run(["git", "push", "origin", branch], cwd=REPO_ROOT, env=env)
 
 
