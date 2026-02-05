@@ -76,6 +76,15 @@ cat ~/.ssh/id_ed25519_common_hosts.pub
 
 ### 2.3 配置 `~/.ssh/config`（关键）
 
+同事需要改动的地方很少：
+- **一般不需要改** `Host github-common-hosts` / `HostName github.com` / `User git`
+- 需要确保 `IdentityFile` 指向 **自己电脑上生成的那把私钥**（本教程默认是）：
+  - `~/.ssh/id_ed25519_common_hosts`
+
+> 友情提示：`Host github-common-hosts` 只是一个 **本机 SSH 别名**，只影响你本机 `git push` 用哪把 key，不会影响最终发布 URL 的前缀域名（URL 仍由组织仓库决定）。
+
+#### 方式 A：手动打开编辑（推荐新手）
+
 打开（没有就新建）：
 
 ````bash
@@ -96,6 +105,30 @@ Host github-common-hosts
 
 保存退出。
 
+#### 方式 B：一条命令自动追加（不会重复追加）
+
+如果不想手动编辑，可以直接复制执行下面这一条（会自动创建文件、设置权限、并且**已存在就不再重复写入**）：
+
+````bash
+set -euo pipefail
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+CONFIG=~/.ssh/config
+BLOCK=$'Host github-common-hosts\n  HostName github.com\n  User git\n  IdentityFile ~/.ssh/id_ed25519_common_hosts\n  IdentitiesOnly yes\n  AddKeysToAgent yes\n  UseKeychain yes\n'
+
+# 确保 config 存在且权限正确
+[ -f "$CONFIG" ] || touch "$CONFIG"
+chmod 600 "$CONFIG"
+
+# 幂等追加：如果已存在 Host 段则跳过
+if ! grep -qE '^Host[[:space:]]+github-common-hosts$' "$CONFIG"; then
+  printf '\n%s\n' "$BLOCK" >> "$CONFIG"
+  echo "✅ 已写入 github-common-hosts 到 ~/.ssh/config"
+else
+  echo "ℹ️ ~/.ssh/config 已存在 github-common-hosts，跳过写入"
+fi
+````
+
 ### 2.4 让 macOS Keychain 记住 passphrase（只需一次）
 
 ````bash
@@ -109,6 +142,50 @@ ssh -T git@github-common-hosts
 ````
 
 出现 `Hi <你的账号>! You've successfully authenticated...` 即可。
+
+### 2.6 新同事快速上手：0 → 可 push（只要 3 条命令）
+
+> 说明：GitHub 网页上“添加 SSH 公钥”这一步仍需要手动点一次（Settings → SSH and GPG keys）。下面 3 条命令负责把你电脑端配置好。
+
+#### 第 1 条：生成 key（如果已存在会提示，你可以选择换文件名或删除后重建）
+
+````bash
+ssh-keygen -t ed25519 -C "你的邮箱" -f ~/.ssh/id_ed25519_common_hosts
+````
+
+生成后，把公钥复制出来粘贴到 GitHub：
+
+````bash
+cat ~/.ssh/id_ed25519_common_hosts.pub
+````
+
+#### 第 2 条：一键写入 `~/.ssh/config`（幂等，不重复追加）
+
+````bash
+set -euo pipefail
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+CONFIG=~/.ssh/config
+BLOCK=$'Host github-common-hosts\n  HostName github.com\n  User git\n  IdentityFile ~/.ssh/id_ed25519_common_hosts\n  IdentitiesOnly yes\n  AddKeysToAgent yes\n  UseKeychain yes\n'
+
+[ -f "$CONFIG" ] || touch "$CONFIG"
+chmod 600 "$CONFIG"
+
+if ! grep -qE '^Host[[:space:]]+github-common-hosts$' "$CONFIG"; then
+  printf '\n%s\n' "$BLOCK" >> "$CONFIG"
+  echo "✅ 已写入 github-common-hosts 到 ~/.ssh/config"
+else
+  echo "ℹ️ ~/.ssh/config 已存在 github-common-hosts，跳过写入"
+fi
+````
+
+#### 第 3 条：加入 Keychain（后续不再反复输 passphrase）+ 验证连通性
+
+````bash
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts && ssh -T git@github-common-hosts
+````
+
+看到 `Hi <你的账号>! You've successfully authenticated...` 就说明 ok。
 
 ---
 
@@ -176,5 +253,3 @@ GitHub Pages 有部署延迟，通常等待 10~60 秒刷新即可。
 如果一直 404：
 - 检查是否 push 失败
 - 检查仓库 Pages 是否已开启
-
-
