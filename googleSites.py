@@ -132,8 +132,42 @@ def _ensure_ssh_agent_has_key() -> None:
     )
 
 
+def _print_git_account_hint() -> None:
+    """Print what identity this process is going to use to push.
+
+    PyCharm 
+    
+    IDE 
+    
+    GitHub 
+
+    Git push 
+    SSH 
+     - remote URL 
+     - ~/.ssh/config  `Host xxx` 
+     - `IdentityFile` 
+
+    
+    """
+    try:
+        remote_url = get_git_remote_url("origin")
+        print(f"🔧 Git remote(origin): {remote_url or '(empty)'}")
+        key_path = _resolve_pages_ssh_key()
+        if key_path:
+            print(f"🔐 Pages SSH key: {key_path}")
+        else:
+            print(f"🔐 Pages SSH key: (not found) expected {DEFAULT_PAGES_SSH_KEY}")
+        print(f"🌐 Preferred SSH host alias: {PREFERRED_GIT_SSH_HOST}")
+    except Exception:
+        pass
+
+
 def _git_env_for_pages_push() -> dict[str, str]:
     """Force git/ssh to use the right identity non-interactively.
+
+    Key point: we explicitly connect to the SSH *alias host* (e.g. github-common-hosts)
+    so ssh will pick the correct IdentityFile, regardless of which GitHub account
+    is logged in inside PyCharm.
 
     Note:
       - BatchMode=yes => never prompt for passphrase. If the key isn't loaded in ssh-agent,
@@ -141,8 +175,10 @@ def _git_env_for_pages_push() -> dict[str, str]:
     """
     _ensure_ssh_agent_has_key()
     return {
+        # : remote is git@github-common-hosts:...
+        # still set -o HostName=... to make sure ssh uses our alias config.
         "GIT_SSH_COMMAND": (
-            "ssh -o BatchMode=yes -o IdentitiesOnly=yes "
+            f"ssh -o HostName=github.com -o BatchMode=yes -o IdentitiesOnly=yes "
             "-o StrictHostKeyChecking=accept-new "
             "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p"
         ),
@@ -189,6 +225,7 @@ def _ensure_origin_uses_preferred_host() -> None:
     new_url = _rewrite_remote_to_preferred_host(remote_url)
     if new_url != remote_url:
         run(["git", "remote", "set-url", "origin", new_url], cwd=REPO_ROOT)
+        print(f"🔧 已将 origin 重写为使用 SSH 别名：{new_url}")
 
 
 def _ensure_git_identity() -> None:
@@ -316,8 +353,16 @@ def git_commit_push(commit_message: str) -> None:
       1) Pull/rebase first to avoid non-fast-forward errors.
       2) Only stage/commit privacy_merge.py + googleSites.py + pages/**
          (do NOT commit root index.html or privacy_text.txt).
+
+    IMPORTANT:
+      - :  PyCharm 
+        : 
+        SSH 
+        remote `git@github-common-hosts:...`
+         `~/.ssh/config`  Host 
     """
     _ensure_origin_uses_preferred_host()
+    _print_git_account_hint()
     _ensure_git_identity()
 
     # 1) Pull first (best effort). If no upstream yet, skip.
@@ -338,9 +383,9 @@ def git_commit_push(commit_message: str) -> None:
 
     st = run(["git", "status", "--porcelain"], cwd=REPO_ROOT, check=False)
     if not (st.stdout or "").strip():
-        print("ℹ️ 没有需要提交的变更（googleSites.py/privacy_merge.py/pages/），跳过 commit。")
+        print("  (googleSites.py/privacy_merge.py/pages/) commit")
     else:
-        run(["git", "commit", "-m", commit_message], cwd=REPO_ROOT)
+        run(["git", "commit", "-m", commit_message], cwd=REPO_ROOT, env=env)
 
     # 3) Push using origin (already rewritten to preferred host).
     b = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT)
