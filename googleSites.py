@@ -132,70 +132,37 @@ def _ensure_ssh_agent_has_key() -> None:
     )
 
 
-def _print_git_account_hint() -> None:
-    """Print what identity this process is going to use to push.
-
-    PyCharm 
-    
-    IDE 
-    
-    GitHub 
-
-    Git push 
-    SSH 
-     - remote URL 
-     - ~/.ssh/config  `Host xxx` 
-     - `IdentityFile` 
-
-    
-    """
-    try:
-        remote_url = get_git_remote_url("origin")
-        print(f"🔧 Git remote(origin): {remote_url or '(empty)'}")
-        key_path = _resolve_pages_ssh_key()
-        if key_path:
-            print(f"🔐 Pages SSH key: {key_path}")
-        else:
-            print(f"🔐 Pages SSH key: (not found) expected {DEFAULT_PAGES_SSH_KEY}")
-        print(f"🌐 Preferred SSH host alias: {PREFERRED_GIT_SSH_HOST}")
-    except Exception:
-        pass
-
-
-def _git_env_for_pages_push() -> dict[str, str]:
-    """Force git/ssh to use the right identity non-interactively.
-
-    Key point: we explicitly connect to the SSH *alias host* (e.g. github-common-hosts)
-    so ssh will pick the correct IdentityFile, regardless of which GitHub account
-    is logged in inside PyCharm.
-
-    Note:
-      - BatchMode=yes => never prompt for passphrase. If the key isn't loaded in ssh-agent,
-        git push will fail fast with a clear error.
-    """
-    _ensure_ssh_agent_has_key()
-    return {
-        # : remote is git@github-common-hosts:...
-        # still set -o HostName=... to make sure ssh uses our alias config.
-        "GIT_SSH_COMMAND": (
-            f"ssh -o HostName=github.com -o BatchMode=yes -o IdentitiesOnly=yes "
-            "-o StrictHostKeyChecking=accept-new "
-            "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p"
-        ),
-        "GIT_PROTOCOL": "version=2",
-    }
-
-
 def _rewrite_remote_to_preferred_host(remote_url: str) -> str:
     """Rewrite origin remote url to use our SSH host alias.
 
+    Supports:
+      - SSH: git@github.com:owner/repo(.git)
+      - SSH alias: git@github-common-hosts:owner/repo(.git)
+      - HTTPS: https://github.com/owner/repo(.git)
+      - GitHub Desktop style: "GitHub - owner/repo" (seen on some Windows setups)
+
     Example:
       git@github.com:common-hosts/privacy-page.git  ->  git@github-common-hosts:common-hosts/privacy-page.git
+      https://github.com/common-hosts/privacy-page  ->  git@github-common-hosts:common-hosts/privacy-page.git
     """
     u = (remote_url or "").strip()
     if not u:
         return u
 
+    # GitHub Desktop / UI style remote name
+    m = re.match(r"^GitHub\s*-\s*([^/\s]+)/([^\s]+)$", u)
+    if m:
+        owner, repo = m.group(1), m.group(2)
+        repo = repo[:-4] if repo.endswith(".git") else repo
+        return f"git@{PREFERRED_GIT_SSH_HOST}:{owner}/{repo}.git"
+
+    # HTTPS
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", u)
+    if m:
+        owner, repo = m.group(1), m.group(2)
+        return f"git@{PREFERRED_GIT_SSH_HOST}:{owner}/{repo}.git"
+
+    # SSH
     m = re.match(r"^git@([^:]+):(.+)$", u)
     if not m:
         return u
@@ -228,26 +195,53 @@ def _ensure_origin_uses_preferred_host() -> None:
         print(f"🔧 已将 origin 重写为使用 SSH 别名：{new_url}")
 
 
-def _ensure_git_identity() -> None:
-    """Prevent commit failures when user.name/user.email not configured."""
+def _print_git_account_hint() -> None:
+    """Print what identity this process is going to use to push."""
+    try:
+        remote_url = get_git_remote_url("origin")
+        if remote_url:
+            proto = "SSH" if remote_url.startswith("git@") else "HTTPS/OTHER"
+            print(f"🔧 Git remote(origin): {remote_url} ({proto})")
+            if proto != "SSH":
+                print(
+                    "⚠️ 检测到 origin 不是 SSH remote。HTTPS remote 会走 IDE/系统凭据，容易出现 403（推送到错误账号）。\n"
+                    "   建议把 origin 改成 SSH：git@github-common-hosts:common-hosts/privacy-page.git"
+                )
+        else:
+            print("🔧 Git remote(origin): (empty)")
 
-    def _cfg(key: str) -> str:
-        p = subprocess.run(
-            ["git", "config", "--get", key],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-        )
-        return _decode_bytes(p.stdout).strip()
+        key_path = _resolve_pages_ssh_key()
+        if key_path:
+            print(f"🔐 Pages SSH key: {key_path}")
+        else:
+            print(f"🔐 Pages SSH key: (not found) expected {DEFAULT_PAGES_SSH_KEY}")
+        print(f"🌐 Preferred SSH host alias: {PREFERRED_GIT_SSH_HOST}")
+    except Exception:
+        pass
 
-    name = _cfg("user.name")
-    email = _cfg("user.email")
-    if not name:
-        run(["git", "config", "user.name", "privacy-bot"], cwd=REPO_ROOT)
-    if not email:
-        run(
-            ["git", "config", "user.email", "privacy-bot@users.noreply.github.com"],
-            cwd=REPO_ROOT,
-        )
+
+def _git_env_for_pages_push() -> dict[str, str]:
+    """Force git/ssh to use the right identity non-interactively.
+
+    Key point: we explicitly connect to the SSH *alias host* (e.g. github-common-hosts)
+    so ssh will pick the correct IdentityFile, regardless of which GitHub account
+    is logged in inside PyCharm.
+
+    Note:
+      - BatchMode=yes => never prompt for passphrase. If the key isn't loaded in ssh-agent,
+        git push will fail fast with a clear error.
+    """
+    _ensure_ssh_agent_has_key()
+    return {
+        # : remote is git@github-common-hosts:...
+        # still set -o HostName=... to make sure ssh uses our alias config.
+        "GIT_SSH_COMMAND": (
+            f"ssh -o HostName=github.com -o BatchMode=yes -o IdentitiesOnly=yes "
+            "-o StrictHostKeyChecking=accept-new "
+            "-o ControlMaster=auto -o ControlPersist=10m -o ControlPath=~/.ssh/cm-%r@%h:%p"
+        ),
+        "GIT_PROTOCOL": "version=2",
+    }
 
 
 def get_repo_slug_from_remote(remote_url: str) -> str:
@@ -355,7 +349,7 @@ def git_commit_push(commit_message: str) -> None:
          (do NOT commit root index.html or privacy_text.txt).
 
     IMPORTANT:
-      - :  PyCharm 
+      -   PyCharm 
         : 
         SSH 
         remote `git@github-common-hosts:...`
@@ -442,6 +436,31 @@ def show_macos_toast(message: str, seconds: int = 3) -> None:
         )
     except Exception:
         pass
+
+
+def _ensure_git_identity() -> None:
+    """Ensure git has user.name/user.email configured.
+
+    Some teammate machines (or fresh Windows installs) don't have git identity set，
+    which makes `git commit` fail. We set a repo-local fallback identity.
+    """
+
+    def _cfg(key: str) -> str:
+        p = subprocess.run(
+            ["git", "config", "--get", key],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+        )
+        return _decode_bytes(p.stdout).strip()
+
+    name = _cfg("user.name")
+    email = _cfg("user.email")
+
+    # Set repository-local config (no --global) to avoid touching user's global setup.
+    if not name:
+        run(["git", "config", "user.name", "privacy-bot"], cwd=REPO_ROOT)
+    if not email:
+        run(["git", "config", "user.email", "privacy-bot@users.noreply.github.com"], cwd=REPO_ROOT)
 
 
 def main():
