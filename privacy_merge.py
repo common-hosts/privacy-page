@@ -20,6 +20,9 @@ from io import BytesIO
 from pathlib import Path
 from DrissionPage import Chromium
 
+# 这里的 URL 和表格 ID 请根据实际情况修改
+# 表格 URL 示例: https://superxgr.larksuite.com/base/SebGbrq2yaNXXSsVOcJudpzxsCf?table=tblTywpT1yCgOaV7&view=vewOnkM00z
+# API 接口示例: SebGbrq2yaNXXSsVOcJudpzxsCf/records
 PRIVACY_GEN_URL = "https://app-privacy-policy-generator.firebaseapp.com/"
 table_url = "https://superxgr.larksuite.com/base/SebGbrq2yaNXXSsVOcJudpzxsCf?table=tblTywpT1yCgOaV7&view=vewOnkM00z"
 api_keyword = "SebGbrq2yaNXXSsVOcJudpzxsCf/records"
@@ -35,6 +38,7 @@ driver = None
 
 # 生成并发布静态页需要的输出文件
 PRIVACY_TEXT_OUT = Path(__file__).resolve().parent / "privacy_text.txt"
+TEMPLATE_HTML_PATH = Path(__file__).resolve().parent / "muban.html"
 
 
 def html_to_formatted_text(html_fragment: str) -> str:
@@ -596,144 +600,135 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
     return publish_url
 
 
-# python
+def _replace_template_fields(template_html: str, app: str, creator: str, mail: str) -> str:
+    """Replace key fields inside muban.html template.
+
+    Replacements:
+      1) In the first sentence: app name + created by name.
+      2) Replace email occurrences in the whole template.
+
+    Template keeps other content unchanged.
+    """
+    html_src = template_html or ""
+
+    app_safe = html.escape(app or "", quote=True)
+    creator_safe = html.escape(creator or "", quote=True)
+    mail_safe = (mail or "").strip()
+
+    # 1) Replace app name in the fixed phrase
+    # Template line: "This privacy policy applies to the BeeKeeper Mania app (hereby referred to as ..."
+    html_src = re.sub(
+        r"(This privacy policy applies to\s+the\s+)(.+?)(\s+app\s*\(hereby referred to as &quot;Application&quot;\))",
+        lambda m: m.group(1) + app_safe + m.group(3),
+        html_src,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # 2) Replace creator name in the fixed phrase
+    html_src = re.sub(
+        r"(for mobile devices that was created by\s+)(.+?)(\s+\(hereby referred to as &quot;Service Provider&quot;\))",
+        lambda m: m.group(1) + creator_safe + m.group(3),
+        html_src,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # 3) Replace email everywhere (both plain and escaped forms)
+    if mail_safe:
+        old_emails = set(re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", html_src))
+        for old in sorted(old_emails, key=len, reverse=True):
+            html_src = html_src.replace(old, mail_safe)
+            html_src = html_src.replace(html.escape(old, quote=True), html.escape(mail_safe, quote=True))
+
+    return html_src
+
+
+def _html_to_plain_text_for_clipboard(rendered_html: str) -> str:
+    """Convert our template HTML (with <br> and simple tags) into readable plain text."""
+    s = rendered_html or ""
+    # Keep line breaks
+    s = re.sub(r"<\s*br\s*/?\s*>", "\n", s, flags=re.IGNORECASE)
+    # Strip all tags
+    s = re.sub(r"<[^>]+>", "", s)
+    # Unescape HTML entities
+    s = html.unescape(s)
+    # Normalize multiple blank lines
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def generate_privacy_html_from_template() -> str:
+    """Generate final privacy HTML by replacing fields in muban.html."""
+    if not TEMPLATE_HTML_PATH.exists():
+        raise FileNotFoundError(f"Template not found: {TEMPLATE_HTML_PATH}")
+
+    template_html = TEMPLATE_HTML_PATH.read_text(encoding="utf-8")
+    return _replace_template_fields(template_html, app=app_name or "", creator=company_name or "", mail=email or "")
+
+
 def run_privacy_flow(driver, target_os="Android", publish_id: str = ""):
+    """New flow: do NOT open privacy generator website.
+
+    We already have app_name/company_name/email from the Lark pipeline.
+    We render muban.html, replace key fields, copy plain text to clipboard,
+    and publish the HTML to GitHub Pages.
+    """
+
     # 让 target_os 默认是 Android（且保证类型正确）
     if not isinstance(target_os, str):
         real_type = type(target_os).__name__
         print(f"❌ target_os 类型错误，期望字符串，实际为: {real_type}，将回退为 Android")
         target_os = "Android"
 
-    driver.get(PRIVACY_GEN_URL)
+    # 0) 渲染 muban.html 模板
     try:
-        WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.CLASS_NAME, "start-btn"))
-        ).click()
+        rendered_html = generate_privacy_html_from_template()
+    except Exception as e:
+        print(f"❌ 渲染模板失败: {e}")
+        return False
+
+    # 1) 复制纯文本到剪贴板，供用户粘贴
+    text_for_clipboard = _html_to_plain_text_for_clipboard(rendered_html)
+    if text_for_clipboard:
+        copy_to_clipboard_macos(text_for_clipboard)
+        _toast_macos("隐私文本已复制", title="PrivacyTools")
+
+    print("------ Privacy Policy 文本 ------")
+    print(text_for_clipboard)
+    print("------ Privacy Policy 文本 ------")
+
+    # 2) 将 HTML 写入文件，供 GitHub Pages 发布
+    try:
+        PRIVACY_TEXT_OUT.write_text(rendered_html, encoding="utf-8")
+        print(f"📝 已写入隐私文本到文件: {PRIVACY_TEXT_OUT}")
+    except Exception as e:
+        print(f"⚠️ 写入隐私文本文件失败: {e}")
+
+    # 3) 关闭任何已打开的浏览器（新流程不再需要）
+    try:
+        driver.quit()
     except Exception:
         pass
 
-    # 等待 appName 输入出现
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, "appName"))
-    )
-    driver.find_element(By.ID, "appName").clear()
-    driver.find_element(By.ID, "appName").send_keys(app_name or "")
-    driver.find_element(By.ID, "appContact").clear()
-    driver.find_element(By.ID, "appContact").send_keys(email or "")
-    time.sleep(0.2)
-    click_next_footer(driver)
+    # 4) 发布到 GitHub Pages（逻辑与之前相同）
+    publish_url = ""
+    try:
+        app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
+        print("🚀 网页发布中。。。大概十几秒吧。。。")
+        publish_url = publish_privacy_page_to_github(app_title=app_title, publish_id=publish_id, content_file=PRIVACY_TEXT_OUT)
 
-    # 继续点击 Next（可能需要多步）
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
+        if publish_url:
+            print(f"🌐 已发布网页地址: {publish_url}")
+            copy_to_clipboard_macos(publish_url)
+            _toast_macos("隐私网页链接已复制", title="PrivacyTools")
+        else:
+            print("⚠️ 未能从发布输出中提取 URL（但通常仍可能已发布成功，请看 googleSites.py 输出）。")
+    except Exception as e:
+        print(f"❌ 发布网页失败: {e}")
 
-    # 选择 Mobile OS
-    radios = driver.find_elements(By.CSS_SELECTOR, 'input[type="radio"]')
-    chosen = False
-    for r in radios:
-        try:
-            val = (r.get_attribute("value") or "").strip()
-            if val and val.lower() == target_os.lower():
-                driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});", r
-                )
-                r.click()
-                chosen = True
-                print(f"✅ 已选择 Mobile OS: {target_os}")
-                break
-        except Exception:
-            continue
-    if not chosen:
-        # 打印页面里实际可用的 value，方便排查
-        available = []
-        for r in radios:
-            try:
-                v = (r.get_attribute("value") or "").strip()
-                if v:
-                    available.append(v)
-            except Exception:
-                continue
-        print(
-            f"❌ 没有找到 OS 选项: {target_os}，页面可用选项: {available or '[]'}"
-        )
-
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
-
-    # 填写 Company Name
-    dev_input = driver.find_elements(By.ID, "devName")
-    if dev_input:
-        el = dev_input[0]
-        el.clear()
-        el.send_keys(company_name or "")
-        print("✅ 已填写 Company Name")
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
-
-    # 勾选第三方服务（示例 id 列表，可以根据页面实际 id 调整）
-    third_party_ids = [
-        "list-switch-Google Analytics for Firebase",
-        "list-switch-Firebase Crashlytics",
-        "list-switch-Adjust",
-    ]
-    for cid in third_party_ids:
-        ensure_check_checkbox(driver, cid, timeout=6)
-        time.sleep(0.2)
-
-    # Next -> Privacy Policy
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
-
-    # 点击 Privacy Policy 按钮
-    footer_links = driver.find_elements(By.CLASS_NAME, "card-footer-item")
-    clicked_priv = False
-    for link in footer_links:
-        try:
-            if link.text.strip().lower() == "privacy policy":
-                link.click()
-                clicked_priv = True
-                print("✅ 已点击 Privacy Policy")
-                break
-        except Exception:
-            continue
-    if not clicked_priv:
-        print("❌ 没有找到 Privacy Policy 按钮")
-    extract_and_show_privacy_text(driver, publish_id=publish_id)
     return True
 
-
-# def create_driver(headless=False, user_data_dir=None, profile_dir=None):
-#     opts = webdriver.ChromeOptions()
-#     opts.add_argument('--start-maximized')
-#     if headless:
-#         opts.add_argument('--headless=new')
-#     if user_data_dir:
-#         opts.add_argument(f'--user-data-dir={user_data_dir}')
-#     if profile_dir:
-#         opts.add_argument(f'--profile-directory={profile_dir}')
-#     return webdriver.Chrome(options=opts)
-
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-
-def create_driver(headless=False, user_data_dir=None, profile_dir=None, chrome_binary=None):
-    opts = webdriver.ChromeOptions()
-    opts.add_argument('--start-maximized')
-    if headless:
-        opts.add_argument('--headless=new')
-    if user_data_dir:
-        opts.add_argument(f'--user-data-dir={user_data_dir}')
-    if profile_dir:
-        opts.add_argument(f'--profile-directory={profile_dir}')
-    if chrome_binary:
-        opts.binary_location = chrome_binary  # 可选：显式指定 Chrome 可执行文件路径
-    service = Service(ChromeDriverManager().install())  # 自动下载并使用匹配的 chromedriver
-    return webdriver.Chrome(service=service, options=opts)
 
 
 def find_and_collect_by_target_value(json_obj, target_value=None):
