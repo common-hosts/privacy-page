@@ -35,7 +35,7 @@ PREFERRED_GIT_SSH_HOST = (os.environ.get("PRIVACY_PAGES_SSH_HOST") or "github-co
 DEFAULT_PAGES_SSH_KEY = Path(os.environ.get("PRIVACY_PAGES_SSH_KEY", "~/.ssh/id_ed25519_common_hosts")).expanduser()
 
 
-def _decode_bytes(b: bytes | None) -> str:
+def _decode_bytes(b: Optional[bytes]) -> str:
     if not b:
         return ""
     try:

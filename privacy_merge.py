@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import html
 import sys
 import urllib
@@ -5,7 +7,6 @@ import subprocess
 import os
 
 import requests
-from selenium import webdriver
 import time
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
