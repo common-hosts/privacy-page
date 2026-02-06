@@ -5,6 +5,7 @@ import sys
 import urllib
 import subprocess
 import os
+from typing import Optional, List, Tuple, Dict, Any
 
 import requests
 import time
@@ -279,8 +280,12 @@ def normalize_text(s):
 # 
 
 
-def _decode_bytes(b: bytes | None) -> str:
-    """Decode subprocess output safely (avoid Windows GBK crashes)."""
+def _decode_bytes(b: Optional[bytes]) -> str:
+    """Decode subprocess output safely (avoid Windows GBK crashes).
+
+    Notes:
+      - Use Optional[bytes] instead of `bytes | None` for Python<3.10 compatibility.
+    """
     if not b:
         return ""
     try:
@@ -289,7 +294,7 @@ def _decode_bytes(b: bytes | None) -> str:
         return b.decode(errors="replace")
 
 
-def _run_capture(cmd: list[str], *, env: dict | None = None, cwd: str | None = None) -> tuple[int, str, str]:
+def _run_capture(cmd: List[str], *, env: Optional[Dict[str, str]] = None, cwd: Optional[str] = None) -> Tuple[int, str, str]:
     """Run a command and capture stdout/stderr safely (bytes -> utf-8 replace)."""
     p = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True)
     return p.returncode, _decode_bytes(p.stdout), _decode_bytes(p.stderr)
@@ -535,10 +540,12 @@ def run_privacy_flow(publish_id: str = ""):
 
 
 def find_and_collect_by_target_value(json_obj, target_value=None):
+    """按订单号筛选。
+
+    - 订单号在字段 `fldxQWjXD7.value[].text`
+    - app_name 从 `fldaShB3Gb.value[0].text` 提取，并写入全局 `app_name`
+    - 返回结果列表：优先返回同条记录里的 `fldnLglcRi.value[0]`（通常是文档 mention），用于后续提取 company/email
     """
-    按订单号筛选并在找到时把 app_name 写入全局变量 app_name，继续返回结果列表。
-    """
-    # 顶层函数本身不直接读写 app_name，只在内部嵌套函数里操作
 
     if not target_value:
         print("❌ 需要提供 target_value (订单编号)，例如 'IGT1185'")
@@ -548,7 +555,6 @@ def find_and_collect_by_target_value(json_obj, target_value=None):
     target_str = str(target_value).strip().lower()
 
     def _search(obj):
-        # 这里显式声明使用全局 app_name，避免 UnboundLocalError
         global app_name
 
         if isinstance(obj, dict):
@@ -557,53 +563,52 @@ def find_and_collect_by_target_value(json_obj, target_value=None):
                 val = fld_order.get("value")
                 if isinstance(val, list):
                     for entry in val:
-                        if isinstance(entry, dict):
-                            text = (entry.get("text") or "").strip()
-                            if text.lower() == target_str:
-                                # 提取 app_name（来自 fldaShB3Gb 的第一个 value 的 text）
-                                found_app_name = None
-                                flda = obj.get("fldaShB3Gb")
-                                if isinstance(flda, dict):
-                                    fval = flda.get("value")
-                                    if isinstance(fval, list) and fval:
-                                        first = fval[0]
-                                        if isinstance(first, dict):
-                                            found_app_name = (first.get("text") or "").strip() or None
+                        if not isinstance(entry, dict):
+                            continue
+                        text = (entry.get("text") or "").strip()
+                        if text.lower() != target_str:
+                            continue
 
-                                # 尝试在 fldnLglcRi 中写入 app_name 并返回其第一个 value
-                                fldn = obj.get("fldnLglcRi")
-                                if isinstance(fldn, dict):
-                                    v = fldn.get("value")
-                                    if isinstance(v, list) and v:
-                                        first_item = v[0]
-                                        if isinstance(first_item, dict):
-                                            if found_app_name:
-                                                first_item["app_name"] = found_app_name
-                                            results.append(first_item)
-                                        else:
-                                            new_item = {"value": first_item}
-                                            if found_app_name:
-                                                new_item["app_name"] = found_app_name
-                                            results.append(new_item)
-                                    else:
-                                        new_item = {}
-                                        if found_app_name:
-                                            new_item["app_name"] = found_app_name
-                                        results.append(new_item)
-                                else:
-                                    if found_app_name:
-                                        results.append({"app_name": found_app_name})
-                                    else:
-                                        results.append(obj)
+                        # 1) app_name
+                        found_app_name = None
+                        flda = obj.get("fldaShB3Gb")
+                        if isinstance(flda, dict):
+                            fval = flda.get("value")
+                            if isinstance(fval, list) and fval:
+                                first = fval[0]
+                                if isinstance(first, dict):
+                                    found_app_name = (first.get("text") or "").strip() or None
 
-                                # 无论之前是否有值，直接把找到的 app_name 赋给全局变量
-                                if found_app_name:
-                                    app_name = found_app_name
-                                    print(f"🔧 已设置全局 app_name = `{app_name}`")
+                        if found_app_name:
+                            app_name = found_app_name
+                            print(f"🔧 已设置全局 app_name = `{app_name}`")
+                        else:
+                            print("⚠️ 未从 fldaShB3Gb 提取到 app_name（可能为空字段）")
 
-                                break
+                        # 2) doc mention（后续用于提取 company/email）
+                        fldn = obj.get("fldnLglcRi")
+                        mention_item = None
+                        if isinstance(fldn, dict):
+                            v = fldn.get("value")
+                            if isinstance(v, list) and v:
+                                mention_item = v[0]
 
-            # 继续递归查找子节点
+                        if isinstance(mention_item, dict):
+                            if found_app_name:
+                                mention_item["app_name"] = found_app_name
+                            results.append(mention_item)
+                        elif mention_item is not None:
+                            new_item = {"value": mention_item}
+                            if found_app_name:
+                                new_item["app_name"] = found_app_name
+                            results.append(new_item)
+                        else:
+                            # 兜底：返回整条记录，至少不为空
+                            payload = {"app_name": found_app_name} if found_app_name else obj
+                            results.append(payload)
+
+                        return  # 命中后即可返回，避免继续递归导致重复命中
+
             for v in obj.values():
                 _search(v)
 
@@ -612,12 +617,45 @@ def find_and_collect_by_target_value(json_obj, target_value=None):
                 _search(item)
 
     _search(json_obj)
+
+    if not results:
+        print(f"❌ 未找到编号 `{target_value}` 对应的记录（fldxQWjXD7）")
+
     return results
+
+
+def _extract_company_from_text(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # 优先 IGTxxxx-NAME 格式
+    m = re.search(r"-(.+)$", t)
+    if m:
+        return m.group(1).strip()
+    # 兜底：取空格后的部分
+    parts = t.split(None, 1)
+    if len(parts) > 1:
+        return parts[1].strip()
+    return t
 
 
 def extract_vps_array_from_doc22(doc_data, cookies_str):
     global company_name, email
     print("🔎 提取页面中首个有效的 @gmail.com 邮箱...")
+
+    # 先从 doc_data 自身尽力补齐 company_name / url
+    normalized_items = []
+    for item in (doc_data or []):
+        if not isinstance(item, dict):
+            continue
+        url = item.get("link") or item.get("url")
+        text = item.get("text") or ""
+        if not company_name and text:
+            company_name = _extract_company_from_text(text)
+            if company_name:
+                print(f"🔧 已设置全局 company_name = `{company_name}`")
+        normalized_items.append({"url": url, "text": text})
+
     results = []
     seen_urls = set()
 
@@ -626,7 +664,7 @@ def extract_vps_array_from_doc22(doc_data, cookies_str):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0 Safari/537.36",
     }
 
-    email_re = re.compile(r'(?<![A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]+@gmail\.com)\b', re.I)
+    email_re = re.compile(r"(?<![A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]+@gmail\.com)\b", re.I)
 
     def _clean_gmail_emails(raw_text):
         found = email_re.findall(raw_text or "")
@@ -637,20 +675,31 @@ def extract_vps_array_from_doc22(doc_data, cookies_str):
             if ne and ne not in seen:
                 seen.add(ne)
                 unique.append(ne)
-        final = []
+
+        # 修复 'nxxx@gmail.com' + 'xxx@gmail.com' 同时存在的情况：优先保留较长/更像真实的
+        if len(unique) <= 1:
+            return unique
+
         sset = set(unique)
+        final = []
         for e in unique:
-            if len(e) > 1 and e[1:] in sset and len(e[0]) == 1:
+            if len(e) > 1 and e[1:] in sset and e[0].isalpha() and e[0].islower():
+                # 存在去掉首字母后仍是一个邮箱，则视为噪声
                 continue
             final.append(e)
         return final
 
-    for item in doc_data:
-        url = item.get("link")
-        text = item.get("text", "")
+    for item in normalized_items:
+        url = item.get("url")
+        text = item.get("text")
         if not url and not text:
             continue
-        if url in seen_urls:
+        if url and url in seen_urls:
+            continue
+
+        if not url:
+            # 没有 url 就无法抓取邮箱，保留记录
+            results.append({"text": text, "url": url, "email": ""})
             continue
 
         try:
@@ -663,34 +712,23 @@ def extract_vps_array_from_doc22(doc_data, cookies_str):
             emails = _clean_gmail_emails(page_content)
             primary = emails[0] if emails else ""
 
-            # 首次发现时，设置全局 company_name 和 email（如果尚未设置）
-            if not company_name:
-                t = (text or "").strip()
-                m = re.search(r'-(.+)$', t)
-                if m:
-                    company_name = m.group(1).strip()
-                else:
-                    parts = t.split(None, 1)
-                    company_name = parts[1].strip() if len(parts) > 1 else (t or "")
-
             if primary and not email:
                 email = primary.strip().lower()
+                print(f"🔧 已设置全局 email = `{email}`")
 
-            results.append(
-                {
-                    "text": text,
-                    "url": url,
-                    "email": primary,
-                }
-            )
+            results.append({"text": text, "url": url, "email": primary})
             seen_urls.add(url)
 
         except Exception as e:
             print(f"❌ 解析失败: {url}, 错误: {e}")
 
-        # 如果全局信息都已填充，可以选择提前退出以加快速度
         if company_name and email:
             break
+
+    if not company_name:
+        print("⚠️ company_name 仍为空：请检查表格字段 fldnLglcRi.value[0].text 是否有 'IGTxxxx-NAME' 文本")
+    if not email:
+        print("⚠️ email 仍为空：请检查 doc 的页面内容里是否确实包含 @gmail.com，或 Cookie 是否失效")
 
     # 按 text 中的数字排序（保持原有行为）
     def _extract_number(t):
@@ -701,7 +739,7 @@ def extract_vps_array_from_doc22(doc_data, cookies_str):
 
     for item in results:
         print(f"{item.get('text')}")
-        if item.get('email'):
+        if item.get("email"):
             print(f"  邮箱: {item.get('email')}")
         else:
             print("  邮箱: 未发现 @gmail.com 地址")
