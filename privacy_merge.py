@@ -5,11 +5,8 @@ import subprocess
 import os
 
 import requests
-from selenium import webdriver
 import time
-from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
-from selenium.webdriver.support.wait import WebDriverWait
 
 import base64
 import gzip
@@ -19,7 +16,6 @@ from io import BytesIO
 from pathlib import Path
 from DrissionPage import Chromium
 
-PRIVACY_GEN_URL = "https://app-privacy-policy-generator.firebaseapp.com/"
 table_url = "https://superxgr.larksuite.com/base/SebGbrq2yaNXXSsVOcJudpzxsCf?table=tblTywpT1yCgOaV7&view=vewOnkM00z"
 api_keyword = "SebGbrq2yaNXXSsVOcJudpzxsCf/records"
 browser = None
@@ -151,19 +147,6 @@ def html_to_formatted_text(html_fragment: str) -> str:
     return text
 
 
-def copy_to_clipboard_macos(text: str) -> bool:
-    """在 macOS 使用 pbcopy 复制文本到系统剪贴板。"""
-    if not text:
-        return False
-    try:
-        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
-        print("✅ 已复制到系统剪贴板 (pbcopy)")
-        return True
-    except Exception as e:
-        print(f"⚠️ 复制到剪贴板失败: {e}")
-        return False
-
-
 def get_gzip_json_from_api(timeout: int = 60):
     """
     1. 监听接口捕获动态参数。
@@ -280,113 +263,13 @@ def normalize_text(s):
     return s.replace('\u200b', '').strip()
 
 
-def ensure_check_checkbox(driver, checkbox_id, timeout=10):
-    """
-    稳健选中 checkbox：滚动、点击 label 或 input，或后备设置 checked 并派发 change。
-    """
-    end_time = time.time() + timeout
-    while time.time() < end_time:
-        try:
-            input_el = WebDriverWait(driver, 1).until(
-                EC.presence_of_element_located((By.ID, checkbox_id))
-            )
-        except Exception:
-            driver.execute_script("window.scrollBy(0, 400);")
-            time.sleep(0.4)
-            continue
-
-        try:
-            label = driver.find_element(By.CSS_SELECTOR, f"label[for=\"{checkbox_id}\"]")
-        except Exception:
-            label = None
-
-        target = label if label is not None else input_el
-        try:
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
-            driver.execute_script("window.scrollBy(0, -80);")
-            time.sleep(0.25)
-        except Exception:
-            pass
-
-        clicked = False
-        if label:
-            try:
-                driver.execute_script("arguments[0].click();", label)
-                clicked = True
-            except Exception:
-                clicked = False
-
-        if not clicked:
-            try:
-                driver.execute_script("arguments[0].click();", input_el)
-                clicked = True
-            except Exception:
-                clicked = False
-
-        if not clicked:
-            try:
-                driver.execute_script(
-                    "var el = document.getElementById(arguments[0]); if(el){ el.checked = true; el.dispatchEvent(new Event('change')); }",
-                    checkbox_id
-                )
-            except Exception:
-                pass
-
-        try:
-            is_checked = driver.execute_script(
-                "var el = document.getElementById(arguments[0]); return !!(el && el.checked);", checkbox_id)
-            if is_checked:
-                print(f"✅ 已成功选中：{checkbox_id}")
-                return True
-        except Exception:
-            pass
-
-        time.sleep(0.4)
-
-    print(f"❌ 无法选中 {checkbox_id}（超时）")
-    return False
-
-
-def click_next_footer(driver, timeout=5):
-    """在页脚点击文本为 Next 的按钮"""
-    end = time.time() + timeout
-    while time.time() < end:
-        buttons = driver.find_elements(By.CLASS_NAME, "card-footer-item")
-        for btn in buttons:
-            try:
-                if btn.text.strip().lower() == "next":
-                    btn.click()
-                    return True
-            except Exception:
-                continue
-        time.sleep(0.3)
-    return False
-
-
-def _toast_macos(message: str, title: str = "PrivacyTools") -> None:
-    """macOS 通知（失败也不影响主流程）。"""
-    try:
-        if not message:
-            return
-        subprocess.run(
-            ["osascript", "-e", f'display notification "{message}" with title "{title}"'],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        pass
-
-
-def _close_modal_if_possible(driver) -> None:
-    """尝试关闭弹窗，不行也不报错。"""
-    try:
-        btns = driver.find_elements(By.CSS_SELECTOR, ".modal.is-active .delete")
-        if btns:
-            driver.execute_script("arguments[0].click();", btns[0])
-            time.sleep(0.2)
-    except Exception:
-        pass
+# （已停用）以下 Selenium 相关逻辑为旧版隐私网站自动化流程，当前模板方案不再需要。
+# 为避免运行期误触发打开/关闭浏览器，这里移除相关函数入口。
+# - ensure_check_checkbox
+# - click_next_footer
+# - _close_modal_if_possible
+# - extract_and_show_privacy_text
+# - create_driver
 
 
 # 
@@ -517,87 +400,6 @@ def publish_privacy_page_to_github(app_title: str, publish_id: str, content_file
     return page_url
 
 
-def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = ""):
-    driver.switch_to.default_content()
-    try:
-        WebDriverWait(driver, wait_seconds).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".modal.is-active #privacy_simple_content"))
-        )
-    except Exception:
-        print("❌ 未检测到弹窗或 privacy_simple_content")
-        return None
-
-    # 直接获取元素的 innerHTML 而不是整页 HTML
-    try:
-        inner_html = driver.execute_script(
-            "var el=document.getElementById('privacy_simple_content');return el?el.innerHTML:'';"
-        )
-    except Exception as e:
-        print(f"❌ 获取 innerHTML 失败: {e}")
-        return None
-
-    if not inner_html:
-        print("❌ privacy_simple_content.innerHTML 为空")
-        return None
-
-    text = html_to_formatted_text(inner_html)
-    if not text:
-        print("❌ 解析结果为空")
-        return None
-
-    # 1) 复制隐私文本到剪贴板 + toast
-    copy_to_clipboard_macos(text)
-    _toast_macos("隐私文本已复制", title="PrivacyTools")
-
-    # 2) 写出到文件给 GitHub Pages 发布用
-    try:
-        PRIVACY_TEXT_OUT.write_text(text, encoding="utf-8")
-        print(f"📝 已写入隐私文本到文件: {PRIVACY_TEXT_OUT}")
-    except Exception as e:
-        print(f"⚠️ 写入隐私文本文件失败: {e}")
-
-    # 3) 控制台日志输出（可查）
-    print("------ Privacy Policy 文本开始 ------")
-    print(text)
-    print("------ Privacy Policy 文本结束 ------")
-
-    # 4) 复制完成后关闭网页/弹窗（先关 modal，再关 tab）
-    _close_modal_if_possible(driver)
-    try:
-        driver.close()
-    except Exception:
-        pass
-
-    # 5) 发布到 GitHub Pages：显示“网页发布中...”，成功后复制 URL + toast
-    publish_url = ""
-    try:
-        app_title = (app_name or "privacy-policy").strip() or "privacy-policy"
-        print("🚀 网页发布中。。。大概十几秒吧。。。")
-        publish_url = publish_privacy_page_to_github(app_title=app_title, publish_id=publish_id, content_file=PRIVACY_TEXT_OUT)
-
-        if publish_url:
-            print(f"🌐 已发布网页地址: {publish_url}")
-            copy_to_clipboard_macos(publish_url)
-            _toast_macos("隐私网页链接已复制", title="PrivacyTools")
-
-            # 6) 发布成功后清理不再需要的文件（根目录 index.html + privacy_text.txt）
-            try:
-                repo_root = Path(__file__).resolve().parent
-                cleanup_paths = [repo_root / "index.html", repo_root / "privacy_text.txt"]
-                for p in cleanup_paths:
-                    if p.exists():
-                        p.unlink()
-                        print(f"🧹 已删除无用文件: {p}")
-            except Exception as e:
-                print(f"⚠️ 清理文件失败（可忽略）: {e}")
-        else:
-            print("⚠️ 未能从发布输出中提取 URL（但通常仍可能已发布成功，请看 googleSites.py 输出）。")
-    except Exception as e:
-        print(f"❌ 发布网页失败: {e}")
-
-    return publish_url
-
-
 def build_privacy_html_from_template(app_name_value: str, company_name_value: str, email_value: str) -> str:
     """基于 muban.html 替换关键字段生成最终 HTML。
 
@@ -694,28 +496,17 @@ def generate_privacy_text_from_muban() -> str:
 
 
 # python
-def run_privacy_flow(driver, target_os="Android", publish_id: str = ""):
-    """保留 driver（用于表格登录等），但隐私文本改为本地模板生成并发布。"""
+def run_privacy_flow(publish_id: str = ""):
+    """生成隐私文本文件并发布到 GitHub Pages。
 
-    # 1) 先用模板生成隐私文本
-    text = generate_privacy_text_from_muban()
+    注意：此流程不再打开 Selenium 浏览器。
+    浏览器仅用于 get_gzip_json_from_api() 的 Lark 登录/抓取。
+    """
 
-    # 2) 复制文本到剪贴板 + toast
-    copy_to_clipboard_macos(text)
-    _toast_macos("隐私文本已复制", title="PrivacyTools")
+    # 1) 用模板生成隐私文本（写入 privacy_text.txt）
+    _ = generate_privacy_text_from_muban()
 
-    # 3) 打印日志
-    print("------ Privacy Policy 文本开始 ------")
-    print(text)
-    print("------ Privacy Policy 文本结束 ------")
-
-    # 4) 关闭 driver（按你的要求，复制完关闭网页）
-    try:
-        driver.quit()
-    except Exception:
-        pass
-
-    # 5) 发布到 GitHub Pages，并把 URL 复制到剪贴板
+    # 2) 发布到 GitHub Pages
     print("🚀 网页发布中。。。")
     page_url = publish_privacy_page_to_github(
         app_title=(app_name or "privacy-policy"),
@@ -725,40 +516,8 @@ def run_privacy_flow(driver, target_os="Android", publish_id: str = ""):
 
     if page_url:
         print(f"🌐 已发布网页地址: {page_url}")
-        copy_to_clipboard_macos(page_url)
-        _toast_macos("隐私网页链接已复制", title="PrivacyTools")
 
     return True
-
-
-# def create_driver(headless=False, user_data_dir=None, profile_dir=None):
-#     opts = webdriver.ChromeOptions()
-#     opts.add_argument('--start-maximized')
-#     if headless:
-#         opts.add_argument('--headless=new')
-#     if user_data_dir:
-#         opts.add_argument(f'--user-data-dir={user_data_dir}')
-#     if profile_dir:
-#         opts.add_argument(f'--profile-directory={profile_dir}')
-#     return webdriver.Chrome(options=opts)
-
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-
-def create_driver(headless=False, user_data_dir=None, profile_dir=None, chrome_binary=None):
-    opts = webdriver.ChromeOptions()
-    opts.add_argument('--start-maximized')
-    if headless:
-        opts.add_argument('--headless=new')
-    if user_data_dir:
-        opts.add_argument(f'--user-data-dir={user_data_dir}')
-    if profile_dir:
-        opts.add_argument(f'--profile-directory={profile_dir}')
-    if chrome_binary:
-        opts.binary_location = chrome_binary  # 可选：显式指定 Chrome 可执行文件路径
-    service = Service(ChromeDriverManager().install())  # 自动下载并使用匹配的 chromedriver
-    return webdriver.Chrome(service=service, options=opts)
 
 
 def find_and_collect_by_target_value(json_obj, target_value=None):
@@ -974,13 +733,8 @@ if __name__ == "__main__":
         available_records = find_and_collect_by_target_value(records, target_value=args.id)
         vps_result = extract_vps_array_from_doc22(available_records, cookies_str)
 
-        # 这里仍然创建 driver：用于后续可能的表格/网页相关操作。
-        # 但 run_privacy_flow 内部会在复制完隐私文本后关闭。
-        driver = create_driver()
-        run_privacy_flow(driver=driver, target_os="Android", publish_id=args.id)
+        # 不再创建 selenium driver（避免运行期间浏览器弹起又关闭）
+        run_privacy_flow(publish_id=args.id)
     finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        # get_gzip_json_from_api 使用的是 DrissionPage Chromium，不是 selenium driver；这里不做 driver.quit()
+        pass
