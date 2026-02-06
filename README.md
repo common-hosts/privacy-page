@@ -7,7 +7,7 @@
 ssh-keygen -t ed25519 -C "你的邮箱" -f ~/.ssh/id_ed25519_common_hosts
 ````
 
-生成后，把公钥复制出来粘贴到 GitHub：
+生成后，把公钥复制出来粘贴到 GitHub， add New SSH：
 
 ````bash
 cat ~/.ssh/id_ed25519_common_hosts.pub
