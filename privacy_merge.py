@@ -497,7 +497,8 @@ def generate_privacy_text_from_muban() -> str:
 
 # python
 def run_privacy_flow(publish_id: str = ""):
-    """生成隐私文本文件并发布到 GitHub Pages。
+    """
+    生成隐私文本文件并发布到 GitHub Pages。
 
     注意：此流程不再打开 Selenium 浏览器。
     浏览器仅用于 get_gzip_json_from_api() 的 Lark 登录/抓取。
@@ -516,6 +517,17 @@ def run_privacy_flow(publish_id: str = ""):
 
     if page_url:
         print(f"🌐 已发布网页地址: {page_url}")
+
+        # 3) 发布成功后清理临时文件（根目录 index.html + privacy_text.txt）
+        repo_root = Path(__file__).resolve().parent
+        cleanup_paths = [repo_root / "index.html", repo_root / "privacy_text.txt"]
+        for p in cleanup_paths:
+            try:
+                if p.exists():
+                    p.unlink()
+                    print(f"🧹 已删除无用文件: {p}")
+            except Exception as e:
+                print(f"⚠️ 删除无用文件失败（可忽略）: {p} -> {e}")
 
     return True
 
