@@ -35,6 +35,9 @@ driver = None
 # 生成并发布静态页需要的输出文件
 PRIVACY_TEXT_OUT = Path(__file__).resolve().parent / "privacy_text.txt"
 
+# muban.html 模板路径（内容固定，只替换少量字段）
+MUBAN_TEMPLATE_PATH = Path(__file__).resolve().parent / "muban.html"
+
 
 def html_to_formatted_text(html_fragment: str) -> str:
     """将 privacy_simple_content 的 innerHTML 转成较好粘贴的纯文本，保留段落、列表和链接结构。"""
@@ -595,113 +598,136 @@ def extract_and_show_privacy_text(driver, wait_seconds=12, publish_id: str = "")
     return publish_url
 
 
+def build_privacy_html_from_template(app_name_value: str, company_name_value: str, email_value: str) -> str:
+    """基于 muban.html 替换关键字段生成最终 HTML。
+
+    只做 2 处替换：
+      1) "This privacy policy applies to the <APP> app ... created by <COMPANY> ..."
+      2) "please contact the Service Provider via email at <EMAIL>."
+
+    模板其他保持不变。
+    """
+    tpl = MUBAN_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    app_safe = (app_name_value or "").strip()
+    company_safe = (company_name_value or "").strip()
+    email_safe = (email_value or "").strip()
+
+    if not app_safe or not company_safe or not email_safe:
+        print(f"⚠️ 模板替换字段可能为空: app_name={app_safe!r}, company_name={company_safe!r}, email={email_safe!r}")
+
+    # 1) 替换 app_name / company_name（只替换这一句里的部分）
+    #    用非贪婪匹配，尽量不破坏模板其它内容。
+    def _repl_main(m: re.Match) -> str:
+        return (
+            "This privacy policy applies to the "
+            + app_safe
+            + " app"
+            + m.group(1)
+            + "created by "
+            + company_safe
+            + m.group(2)
+        )
+
+    main_pat = re.compile(
+        r"This privacy policy applies to the\s+.*?\s+app(\s*\(hereby referred to as\s+&quot;Application&quot;\)\s+for mobile devices that was\s+)(?:created by\s+).*?(\s+\(hereby referred to as\s+&quot;Service Provider&quot;\)\s+as a Free service)",
+        re.I | re.S,
+    )
+    new_tpl, n1 = main_pat.subn(_repl_main, tpl, count=1)
+    if n1 == 0:
+        # 兜底：如果模板句子略有不同，尝试宽松一点的匹配
+        loose_pat = re.compile(r"This privacy policy applies to the\s+.*?\s+app\s*\(.*?\)\s+for mobile devices that was created by\s+.*?\s*\(.*?\)\s+as a Free service", re.I | re.S)
+        loose_match = loose_pat.search(new_tpl)
+        if loose_match:
+            s = loose_match.group(0)
+            s2 = re.sub(r"This privacy policy applies to the\s+.*?\s+app", f"This privacy policy applies to the {app_safe} app", s, flags=re.I | re.S)
+            s2 = re.sub(r"created by\s+.*?\s*\(", f"created by {company_safe} (", s2, flags=re.I | re.S)
+            new_tpl = new_tpl.replace(s, s2)
+            n1 = 1
+
+    # 2) 替换底部 Contact Us 里的邮箱（可能出现多次，我们替换全部）
+    #    按用户说的那句来替换（不改变其它地方）
+    contact_pat = re.compile(
+        r"please contact the Service Provider via email at\s+[^<\s]+@gmail\.com\.",
+        re.I,
+    )
+    new_tpl2, n2 = contact_pat.subn(
+        f"please contact the Service Provider via email at {email_safe}.",
+        new_tpl,
+    )
+
+    # 模板里也可能有括号形式的邮箱（例如 Children 段），一并替换同一个邮箱
+    new_tpl3 = re.sub(r"\([^\s()]+@gmail\.com\)", f"({email_safe})", new_tpl2, flags=re.I)
+
+    if n1 == 0:
+        print("⚠️ 未命中模板主句替换（app_name/company_name），请确认 muban.html 中该句是否有改动。")
+    if n2 == 0:
+        print("⚠️ 未命中模板 Contact Us 邮箱替换（email），请确认 muban.html 中该句是否有改动。")
+
+    return new_tpl3
+
+
+def privacy_html_to_plain_text(html_doc: str) -> str:
+    """把模板 HTML 转成更适合粘贴的纯文本，保留换行/列表/链接。"""
+    soup = BeautifulSoup(html_doc or "", "html.parser")
+    content = soup.select_one("#privacy_simple_content")
+    # 我们的 muban.html 不一定有这个 id，这里兼容：优先取 .content
+    if content is None:
+        content = soup.select_one(".content")
+    if content is None:
+        content = soup
+
+    # 使用已有的 html_to_formatted_text：它接受 innerHTML
+    return html_to_formatted_text(str(content))
+
+
+def generate_privacy_text_from_muban() -> str:
+    """直接用 muban.html 生成隐私文本（无需打开隐私生成网站）。"""
+    html_doc = build_privacy_html_from_template(app_name, company_name, email)
+    text = privacy_html_to_plain_text(html_doc)
+    if not text:
+        raise RuntimeError("未能从 muban.html 生成可用的隐私文本")
+
+    # 写文件供发布脚本使用
+    PRIVACY_TEXT_OUT.write_text(text, encoding="utf-8")
+    return text
+
+
 # python
 def run_privacy_flow(driver, target_os="Android", publish_id: str = ""):
-    # 让 target_os 默认是 Android（且保证类型正确）
-    if not isinstance(target_os, str):
-        real_type = type(target_os).__name__
-        print(f"❌ target_os 类型错误，期望字符串，实际为: {real_type}，将回退为 Android")
-        target_os = "Android"
+    """保留 driver（用于表格登录等），但隐私文本改为本地模板生成并发布。"""
 
-    driver.get(PRIVACY_GEN_URL)
+    # 1) 先用模板生成隐私文本
+    text = generate_privacy_text_from_muban()
+
+    # 2) 复制文本到剪贴板 + toast
+    copy_to_clipboard_macos(text)
+    _toast_macos("隐私文本已复制", title="PrivacyTools")
+
+    # 3) 打印日志
+    print("------ Privacy Policy 文本开始 ------")
+    print(text)
+    print("------ Privacy Policy 文本结束 ------")
+
+    # 4) 关闭 driver（按你的要求，复制完关闭网页）
     try:
-        WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.CLASS_NAME, "start-btn"))
-        ).click()
+        driver.quit()
     except Exception:
         pass
 
-    # 等待 appName 输入出现
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, "appName"))
+    # 5) 发布到 GitHub Pages，并把 URL 复制到剪贴板
+    print("🚀 网页发布中。。。")
+    page_url = publish_privacy_page_to_github(
+        app_title=(app_name or "privacy-policy"),
+        publish_id=publish_id,
+        content_file=PRIVACY_TEXT_OUT,
     )
-    driver.find_element(By.ID, "appName").clear()
-    driver.find_element(By.ID, "appName").send_keys(app_name or "")
-    driver.find_element(By.ID, "appContact").clear()
-    driver.find_element(By.ID, "appContact").send_keys(email or "")
-    time.sleep(0.2)
-    click_next_footer(driver)
 
-    # 继续点击 Next（可能需要多步）
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
+    if page_url:
+        print(f"🌐 已发布网页地址: {page_url}")
+        copy_to_clipboard_macos(page_url)
+        _toast_macos("隐私网页链接已复制", title="PrivacyTools")
 
-    # 选择 Mobile OS
-    radios = driver.find_elements(By.CSS_SELECTOR, 'input[type="radio"]')
-    chosen = False
-    for r in radios:
-        try:
-            val = (r.get_attribute("value") or "").strip()
-            if val and val.lower() == target_os.lower():
-                driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});", r
-                )
-                r.click()
-                chosen = True
-                print(f"✅ 已选择 Mobile OS: {target_os}")
-                break
-        except Exception:
-            continue
-    if not chosen:
-        # 打印页面里实际可用的 value，方便排查
-        available = []
-        for r in radios:
-            try:
-                v = (r.get_attribute("value") or "").strip()
-                if v:
-                    available.append(v)
-            except Exception:
-                continue
-        print(
-            f"❌ 没有找到 OS 选项: {target_os}，页面可用选项: {available or '[]'}"
-        )
-
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
-
-    # 填写 Company Name
-    dev_input = driver.find_elements(By.ID, "devName")
-    if dev_input:
-        el = dev_input[0]
-        el.clear()
-        el.send_keys(company_name or "")
-        print("✅ 已填写 Company Name")
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
-
-    # 勾选第三方服务（示例 id 列表，可以根据页面实际 id 调整）
-    third_party_ids = [
-        "list-switch-Google Analytics for Firebase",
-        "list-switch-Firebase Crashlytics",
-        "list-switch-Adjust",
-    ]
-    for cid in third_party_ids:
-        ensure_check_checkbox(driver, cid, timeout=6)
-        time.sleep(0.2)
-
-    # Next -> Privacy Policy
-    time.sleep(0.2)
-    click_next_footer(driver)
-    time.sleep(0.2)
-
-    # 点击 Privacy Policy 按钮
-    footer_links = driver.find_elements(By.CLASS_NAME, "card-footer-item")
-    clicked_priv = False
-    for link in footer_links:
-        try:
-            if link.text.strip().lower() == "privacy policy":
-                link.click()
-                clicked_priv = True
-                print("✅ 已点击 Privacy Policy")
-                break
-        except Exception:
-            continue
-    if not clicked_priv:
-        print("❌ 没有找到 Privacy Policy 按钮")
-    extract_and_show_privacy_text(driver, publish_id=publish_id)
     return True
 
 
@@ -948,6 +974,8 @@ if __name__ == "__main__":
         available_records = find_and_collect_by_target_value(records, target_value=args.id)
         vps_result = extract_vps_array_from_doc22(available_records, cookies_str)
 
+        # 这里仍然创建 driver：用于后续可能的表格/网页相关操作。
+        # 但 run_privacy_flow 内部会在复制完隐私文本后关闭。
         driver = create_driver()
         run_privacy_flow(driver=driver, target_os="Android", publish_id=args.id)
     finally:
