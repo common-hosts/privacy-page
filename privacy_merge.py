@@ -757,6 +757,30 @@ def save_to_json(data, filename="none.json"):
 import argparse
 
 
+def _standardize_id(raw: Optional[str]) -> Optional[str]:
+    """Normalize user input ID.
+
+    - If user enters only digits (e.g. '1128'), return 'IGT1128'.
+    - If user enters 'igt1128' or 'IGT1128' (any case), normalize to upper 'IGT' prefix + digits.
+    - Otherwise return the stripped original string.
+    Returns None if input is falsy.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    # If purely digits, prefix with IGT
+    if re.fullmatch(r"\d+", s):
+        return f"IGT{s}"
+    # If starts with optional non-alnum then IGT and digits, normalize
+    m = re.fullmatch(r"(?i)igt(\d+)", s)
+    if m:
+        return f"IGT{m.group(1)}"
+    # Otherwise leave as-is (trimmed)
+    return s
+
+
 if __name__ == "__main__":
     # 在运行 push 之前只做一次检查：如果 key 没加载，会提示同事执行一次 ssh-add
     ensure_github_ssh_keychain_ready()
@@ -774,6 +798,14 @@ if __name__ == "__main__":
 
     if not args.id:
         print("❌ 未提供编号，脚本将退出。\n示例用法：python privacys.py IGT1128 --scan")
+        sys.exit(2)
+
+    # 规范化 id：支持数字直接输入（自动加 IGT），以及大小写不敏感
+    args.id = _standardize_id(args.id)
+    if args.id:
+        print(f"🔎 使用编号: {args.id}")
+    else:
+        print("❌ 提供的编号无效，脚本退出")
         sys.exit(2)
 
     try:
