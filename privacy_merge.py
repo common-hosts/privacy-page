@@ -532,7 +532,7 @@ def run_privacy_flow(publish_id: str = ""):
             try:
                 if p.exists():
                     p.unlink()
-                    print(f"🧹 已删除无用文件: {p}")
+                    # print(f"🧹 已删除无用文件: {p}")
             except Exception as e:
                 print(f"⚠️ 删除无用文件失败（可忽略）: {p} -> {e}")
 
