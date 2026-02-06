@@ -41,4 +41,7 @@ ssh-add --apple-use-keychain ~/.ssh/id_ed25519_common_hosts && ssh -T git@github
 
 看到 `Hi <你的账号>! You've successfully authenticated...` 就说明 ok。
 
+运行脚本  privacy_merge.py 发布隐私政策
+发布成功后有些延迟看到内容;
+
 
