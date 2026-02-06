@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CopilotDiffPersistence">
+    <option name="pendingDiffs">
+      <map>
+        <entry key="$PROJECT_DIR$/index.html">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/index.html" />
+              <option name="updatedContent" value="&lt;!doctype html&gt;&#10;&lt;html lang=&quot;en&quot;&gt;&#10;&lt;head&gt;&#10;  &lt;meta charset=&quot;utf-8&quot; /&gt;&#10;  &lt;meta name=&quot;viewport&quot; content=&quot;width=device-width,initial-scale=1&quot; /&gt;&#10;  &lt;meta name=&quot;robots&quot; content=&quot;noindex,nofollow&quot; /&gt;&#10;  &lt;title&gt;404 Not Found&lt;/title&gt;&#10;  &lt;style&gt;&#10;    html,body{height:100%;margin:0}&#10;    body{display:flex;align-items:center;justify-content:center;background:#fff;color:#111;font-family:Inter, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Roboto, &quot;Helvetica Neue&quot;, Arial;}&#10;    .box{max-width:680px;padding:40px;text-align:center}&#10;    h1{font-size:48px;margin:0 0 8px;font-weight:700}&#10;    p{margin:0;color:#444}&#10;    .sub{margin-top:12px;font-size:13px;color:#666}&#10;  &lt;/style&gt;&#10;&lt;/head&gt;&#10;&lt;body&gt;&#10;  &lt;div class=&quot;box&quot;&gt;&#10;    &lt;h1&gt;404&lt;/h1&gt;&#10;    &lt;p&gt;Not Found&lt;/p&gt;&#10;    &lt;div class=&quot;sub&quot;&gt;If you arrived here by mistake, contact the site administrator.&lt;/div&gt;&#10;  &lt;/div&gt;&#10;&lt;/body&gt;&#10;&lt;/html&gt;&#10;" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
+        <entry key="$PROJECT_DIR$/robots.txt">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="$PROJECT_DIR$/robots.txt" />
+              <option name="updatedContent" value="User-agent: *&#10;Disallow: /&#10;" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>
