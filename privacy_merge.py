@@ -525,9 +525,9 @@ def run_privacy_flow(publish_id: str = ""):
     if page_url:
         print(f"🌐 已发布网页地址: {page_url}")
 
-        # 3) 发布成功后清理临时文件（根目录 index.html + privacy_text.txt）
+        # 3) 发布成功后清理临时文件（仅 privacy_text.txt；根目录 index.html 作为 Pages 默认页不要删除）
         repo_root = Path(__file__).resolve().parent
-        cleanup_paths = [repo_root / "index.html", repo_root / "privacy_text.txt"]
+        cleanup_paths = [repo_root / "privacy_text.txt"]
         for p in cleanup_paths:
             try:
                 if p.exists():
