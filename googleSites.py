@@ -328,12 +328,10 @@ def write_privacy_page(page: PageData, page_slug: str) -> Path:
     return out_path
 
 
-def write_root_landing(latest_url: str) -> None:
-    landing = (
-        f"<html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0; url={html.escape(latest_url)}\"></head>\n"
-        f"<body>Redirecting to <a href=\"{html.escape(latest_url)}\">{html.escape(latest_url)}</a>...</body></html>\n"
-    )
-    INDEX_HTML_PATH.write_text(landing, encoding="utf-8")
+# NOTE:
+# We intentionally do NOT write/overwrite repository root `index.html` here.
+# Root `index.html` is reserved as a permanent '404 / Not Found' landing page
+# to avoid leaking repo details and to prevent per-app publishes from clobbering it.
 
 
 def read_content_from_file(path: Path) -> str:
@@ -502,11 +500,7 @@ def main():
     repo_slug = get_repo_slug_from_remote(get_git_remote_url("origin"))
     page_url = github_pages_base_url(repo_slug) + f"pages/{page_slug}/"
 
-    # optional: write root index.html redirect for convenience
-    try:
-        write_root_landing(page_url)
-    except Exception:
-        pass
+    # Do NOT overwrite root index.html (keep permanent 404 landing page)
 
     print(f"✅ Wrote privacy page: {out_path}")
     print(f"🌐 Page URL: {page_url}")
